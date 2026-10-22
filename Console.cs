@@ -13,6 +13,22 @@ namespace Do
     class Console
     {
         /// <summary>
+        /// Прочитать строку ввода (делегирование системной консоли).
+        /// </summary>
+        public static string ReadLine()
+        {
+            return System.Console.ReadLine();
+        }
+
+        /// <summary>
+        /// Сбросить цвет текста консоли (делегирование системной консоли).
+        /// </summary>
+        public static void ResetColor()
+        {
+            System.Console.ResetColor();
+        }
+
+        /// <summary>
         /// Цвет сообщений по умолчанию.
         /// </summary>
         public static ConsoleColor defColor = ConsoleColor.Green;

@@ -308,7 +308,7 @@ partial class User
             catch
             { }
         }
-        public static int changed_ = 0;
+        // changed_ объявлен в Users.Database.cs (тот же partial-класс User)
 
 }
 }

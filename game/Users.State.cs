@@ -117,7 +117,7 @@ partial class User
             while (System.Threading.Interlocked.CompareExchange(ref _online, current - 1, current) != current);
         }
         public Clan Clan;
-        public Ship Ship;
+        // Ship объявлен в главном файле Users.cs (partial User)
         public Setting Settings;
         public SettingsAssembly Setting;
         public Pet Pet;

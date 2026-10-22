@@ -1,4 +1,5 @@
 ﻿using MySQLManager.Database;
+using MySQLManager.Database.Database_Exceptions;
 using MySQLManager.Session_Details.Interfaces;
 using MySql.Data.MySqlClient;
 using System;

@@ -97,7 +97,7 @@ namespace Do.serverGame
         /// <summary>
         /// Проверка попадания корабля в стартовую безопасную зону его фракции.
         /// </summary>
-        private bool IsInFactionSecureZone(short factionId, int x, int y)
+        private bool IsInFactionSecureZone(ushort factionId, int x, int y)
         {
             Dictionary<ushort, int[]> zones;
             if (!FactionSecureZones.TryGetValue(factionId, out zones)) return false;
