@@ -13,6 +13,9 @@
     using System.Collections;
     using System.Data.SqlClient;
 
+    /// <summary>
+    /// Менеджер базы данных: пул клиентов (MySQL/MS SQL), строка подключения и выдача реакторов запросов.
+    /// </summary>
     public class DatabaseManager
     {
         private int beginClientAmount;
@@ -24,8 +27,18 @@
         private Queue connections;
         internal DatabaseType type { get; set; }
 
+        /// <summary>
+        /// Глобальный переключатель: выполнять ли запросы к базе данных вообще.
+        /// </summary>
         public static bool dbEnabled = true;
 
+        /// <summary>
+        /// Создаёт менеджер с указанным размером пула и типом СУБД.
+        /// </summary>
+        /// <param name="maxPoolSize">Максимальный размер пула соединений.</param>
+        /// <param name="clientAmount">Начальное количество клиентов.</param>
+        /// <param name="dbType">Тип базы данных.</param>
+        /// <exception cref="DatabaseException">Если начальные клиенты превышают размер пула.</exception>
         public DatabaseManager(uint maxPoolSize, int clientAmount, DatabaseType dbType)
         {
             if (maxPoolSize < clientAmount)
@@ -37,6 +50,10 @@
             this.connections = new Queue();
         }
 
+        /// <summary>
+        /// Создаёт, подключает и добавляет в список новый MySQL-клиент.
+        /// </summary>
+        /// <param name="id">Идентификатор соединения.</param>
         private void addConnection(int id)
         {
             var item = new MySqlClient(this, id);
@@ -44,6 +61,9 @@
             this.databaseClients.Add(item);
         }
 
+        /// <summary>
+        /// Формирует строку подключения в зависимости от типа СУБД (MySQL или MS SQL).
+        /// </summary>
         private void createNewConnectionString()
         {
             if (this.type == DatabaseType.MySql)
@@ -87,6 +107,9 @@
             }
         }
 
+        /// <summary>
+        /// Останавливает менеджер: освобождает и отключает все клиенты, очищает список.
+        /// </summary>
         public void destroy()
         {
             lock (this)
@@ -109,6 +132,9 @@
             }
         }
 
+        /// <summary>
+        /// Отключает свободные (незанятые) клиенты пула.
+        /// </summary>
         private void disconnectUnusedClients()
         {
             lock (this)
@@ -123,11 +149,19 @@
             }
         }
 
+        /// <summary>
+        /// Возвращает текущую строку подключения.
+        /// </summary>
+        /// <returns>Строка подключения.</returns>
         internal string getConnectionString()
         {
             return this.connectionString;
         }
 
+        /// <summary>
+        /// Выдаёт реактор запросов: берёт свободный клиент из пула либо создаёт новый.
+        /// </summary>
+        /// <returns>Экземпляр <see cref="IQueryAdapter"/>.</returns>
         public IQueryAdapter getQueryreactor()
         {
             IDatabaseClient dbClient = null;
@@ -163,6 +197,10 @@
             }
         }
 
+        /// <summary>
+        /// Возвращает освободившийся клиент обратно в пул соединений.
+        /// </summary>
+        /// <param name="dbClient">Освобождённый клиент БД.</param>
         internal void FreeConnection(IDatabaseClient dbClient)
         {
             lock (connections.SyncRoot)
@@ -171,6 +209,10 @@
             }
         }
 
+        /// <summary>
+        /// Инициализирует менеджер: строит строку подключения и список клиентов.
+        /// </summary>
+        /// <exception cref="Exception">Если не удалось подключить клиентов к базе.</exception>
         public void init()
         {
             try
@@ -186,16 +228,33 @@
             this.isConnected = true;
         }
 
+        /// <summary>
+        /// Проверяет, инициализировано ли соединение с базой данных.
+        /// </summary>
+        /// <returns>True, если менеджер подключён.</returns>
         public bool isConnectedToDatabase()
         {
             return this.isConnected;
         }
 
+        /// <summary>
+        /// Сохраняет строку подключения.
+        /// </summary>
+        /// <param name="connectionString">Новая строка подключения.</param>
         private void setConnectionString(string connectionString)
         {
             this.connectionString = connectionString;
         }
 
+        /// <summary>
+        /// Задаёт параметры сервера базы данных.
+        /// </summary>
+        /// <param name="host">Адрес хоста.</param>
+        /// <param name="port">Порт сервера.</param>
+        /// <param name="username">Имя пользователя.</param>
+        /// <param name="password">Пароль.</param>
+        /// <param name="databaseName">Имя базы данных.</param>
+        /// <returns>True, если параметры корректны; иначе false.</returns>
         public bool setServerDetails(string host, uint port, string username, string password, string databaseName)
         {
             try

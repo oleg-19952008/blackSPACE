@@ -6,14 +6,30 @@ using System.Threading.Tasks;
 
 namespace Do
 {
+    /// <summary>
+    /// Класс простого симметричного шифрования данных (XOR + Base64),
+    /// используемый для кодирования/декодирования игровых параметров.
+    /// </summary>
    public class core
     {
+        /// <summary>
+        /// Строка-буфер для данных, подлежащих кодированию.
+        /// </summary>
 	  public string for_encode = "";
  
+        /// <summary>
+        /// Вывод объекта в консоль (в текущей реализации заглушка).
+        /// </summary>
+        /// <param name="a">Объект для вывода.</param>
         public void out_(object a)
         {
           //  Console.WriteLine(Encoding.Default.GetString(Encoding.Default.GetBytes(a.ToString())));
         }
+        /// <summary>
+        /// Кодирует строку: побайтовый XOR с ключом, затем Base64.
+        /// </summary>
+        /// <param name="s">Исходная строка.</param>
+        /// <returns>Закодированная строка в формате Base64.</returns>
         public string encode(string s)
         {
             int key = 25;
@@ -38,6 +54,11 @@ namespace Do
             catch { }
             return ou_;
         }
+        /// <summary>
+        /// Декодирует строку из Base64 обратно с помощью побайтового XOR с ключом.
+        /// </summary>
+        /// <param name="u">Закодированная строка в формате Base64.</param>
+        /// <returns>Исходная раскодированная строка.</returns>
         public string decode(string u)
         {
             int key = 25;

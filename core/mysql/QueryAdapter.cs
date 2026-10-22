@@ -7,6 +7,10 @@ using Do;
 
 namespace MySQLManager.Database.Session_Details
 {
+    /// <summary>
+    /// Базовый адаптер SQL-запросов MySQL: выполняет команды и возвращает результаты,
+    /// перехватывая ошибки и логируя их через <see cref="Do.Out"/>.
+    /// </summary>
     internal class QueryAdapter : IRegularQueryAdapter
     {
         private static bool dbEnabled
@@ -27,21 +31,39 @@ namespace MySQLManager.Database.Session_Details
             }
         }
 
+        /// <summary>
+        /// Создаёт адаптер для указанного MySQL-клиента.
+        /// </summary>
+        /// <param name="client">Клиент MySQL.</param>
         internal QueryAdapter(MySqlClient client)
         {
             this.client = client;
         }
 
+        /// <summary>
+        /// Добавляет к команде BLOB-параметр с двоичными данными.
+        /// </summary>
+        /// <param name="name">Имя параметра.</param>
+        /// <param name="data">Двоичные данные.</param>
         public void addParameter(string name, byte[] data)
         {
             this.command.Parameters.Add(new MySqlParameter(name, MySqlDbType.Blob, data.Length));
         }
 
+        /// <summary>
+        /// Добавляет к команде параметр со значением произвольного типа.
+        /// </summary>
+        /// <param name="parameterName">Имя параметра.</param>
+        /// <param name="val">Значение параметра.</param>
         public void addParameter(string parameterName, object val)
         {
             this.command.Parameters.AddWithValue(parameterName, val);
         }
 
+        /// <summary>
+        /// Проверяет, возвращает ли запрос хотя бы одну строку.
+        /// </summary>
+        /// <returns>True, если есть результат; false при ошибке или отключённой БД.</returns>
         public bool findsResult()
         {
             if (!dbEnabled)
@@ -62,6 +84,10 @@ namespace MySQLManager.Database.Session_Details
             return hasRows;
         }
 
+        /// <summary>
+        /// Выполняет запрос и возвращает первое поле результата как целое число.
+        /// </summary>
+        /// <returns>Целочисленное значение (0 при ошибке или отключённой БД).</returns>
         public int getInteger()
         {
             if (!dbEnabled)
@@ -83,6 +109,10 @@ namespace MySQLManager.Database.Session_Details
             return result;
         }
 
+        /// <summary>
+        /// Выполняет запрос и возвращает единственную строку результата.
+        /// </summary>
+        /// <returns>Объект <see cref="DataRow"/> или null, если строк не ровно одна либо ошибка.</returns>
         public DataRow getRow()
         {
             if (!dbEnabled)
@@ -108,6 +138,10 @@ namespace MySQLManager.Database.Session_Details
             return row;
         }
 
+        /// <summary>
+        /// Выполняет запрос и возвращает первое поле результата как строку.
+        /// </summary>
+        /// <returns>Строковое значение (пустая строка при ошибке или отключённой БД).</returns>
         public string getString()
         {
             if (!dbEnabled)
@@ -129,6 +163,10 @@ namespace MySQLManager.Database.Session_Details
             return str;
         }
 
+        /// <summary>
+        /// Выполняет запрос и возвращает весь результат в виде таблицы.
+        /// </summary>
+        /// <returns>Объект <see cref="DataTable"/> (пустой при ошибке или отключённой БД).</returns>
         public DataTable getTable()
         {
             var now = DateTime.Now;
@@ -149,6 +187,10 @@ namespace MySQLManager.Database.Session_Details
             return dataTable;
         }
 
+        /// <summary>
+        /// Выполняет INSERT-запрос и возвращает идентификатор последней вставленной записи.
+        /// </summary>
+        /// <returns>LastInsertedId (0 при ошибке или отключённой БД).</returns>
         public long insertQuery()
         {
             if (!dbEnabled)
@@ -168,6 +210,14 @@ namespace MySQLManager.Database.Session_Details
             return lastInsertedId;
         }
 
+        /// <summary>
+        /// Выполняет SQL-запрос, автоматически выбирая способ обработки по его типу
+        /// (INSERT — скалярное значение, SELECT — таблица, прочее — ExecuteNonQuery).
+        /// </summary>
+        /// <param name="query">Текст SQL-запроса.</param>
+        /// <param name="parametersKeys">Имена параметров (необязательно).</param>
+        /// <param name="parametersValues">Значения параметров (необязательно).</param>
+        /// <returns>Результат выполнения запроса.</returns>
         public object query(string query, string[] parametersKeys = null, string[] parametersValues = null)
         {
             if (!dbEnabled)
@@ -208,6 +258,11 @@ namespace MySQLManager.Database.Session_Details
             return 0;
         }
 
+        /// <summary>
+        /// Выполняет накопленную команду (ExecuteNonQuery). При ошибке откатывает
+        /// активную транзакцию и пробрасывает <see cref="DatabaseException"/> наверх.
+        /// </summary>
+        /// <exception cref="DatabaseException">Если запрос завершился с ошибкой.</exception>
         public void runQuery()
         {
             if (!dbEnabled)
@@ -236,6 +291,11 @@ namespace MySQLManager.Database.Session_Details
 
         // Если команда выполнялась внутри MySqlTransaction, при ошибке делаем явный
         // Rollback (иначе частично выполненные запросы рискуют быть закоммиченными).
+        /// <summary>
+        /// Если команда выполнялась внутри MySqlTransaction, при ошибке делает явный Rollback
+        /// (иначе частично выполненные запросы рискуют быть закоммиченными).
+        /// </summary>
+        /// <param name="cause">Исходная ошибка, вызвавшая откат.</param>
         private void TryRollbackActiveTransaction(Exception cause)
         {
             try
@@ -255,6 +315,10 @@ namespace MySQLManager.Database.Session_Details
             }
         }
 
+        /// <summary>
+        /// Очищает параметры команды и задаёт текст SQL-запроса.
+        /// </summary>
+        /// <param name="query">Текст SQL-запроса.</param>
         public void setQuery(string query)
         {
             this.command.Parameters.Clear();

@@ -9,21 +9,47 @@ using System.Threading.Tasks;
 
 namespace Do.Core
 {
+    /// <summary>
+    /// Хранит состояние асинхронного приёма данных для одного сокета.
+    /// </summary>
     public class StateObject
     {
+        /// <summary>
+        /// Рабочий сокет соединения.
+        /// </summary>
         public Socket WorkSocket = null;
+        /// <summary>
+        /// Размер буфера приёма данных в байтах.
+        /// </summary>
         public  const int BufferSize = 2048;
+        /// <summary>
+        /// Буфер для входящих байтов.
+        /// </summary>
         public byte[] Buffer = new byte[BufferSize];
+        /// <summary>
+        /// Накопитель принятых данных в виде строки.
+        /// </summary>
         public StringBuilder Sb = new StringBuilder();
     }
     
 
 
+  /// <summary>
+  /// Асинхронный слушатель TCP-сокетов: принимает входящие подключения клиентов игры
+  /// и создаёт для каждого соединения объект пользователя.
+  /// </summary>
   public  class AsynchronousSocketListener
     {
         // Thread signal.
+        /// <summary>
+        /// Событие для синхронизации потока прослушивания с моментом принятия соединения.
+        /// </summary>
         public static ManualResetEvent AllDone = new ManualResetEvent(false);     
  
+        /// <summary>
+        /// Запускает прослушивание порта 8080, инициализирует игровой цикл (RUN)
+        /// и в бесконечном цикле принимает входящие соединения.
+        /// </summary>
         public static void StartListening()
         {
            
@@ -56,6 +82,10 @@ namespace Do.Core
             }
         }
 
+        /// <summary>
+        /// Колбэк принятия входящего соединения: создаёт объект пользователя (игры) для сокета клиента.
+        /// </summary>
+        /// <param name="ar">Результат асинхронной операции Accept.</param>
         public static void AcceptCallback(IAsyncResult ar)
         {
             AllDone.Set();      
