@@ -1,1 +1,0 @@
-taskkill /f /im server.starter.ui.exe

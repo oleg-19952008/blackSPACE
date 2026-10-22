@@ -1,4 +1,0 @@
-C:\Users\NavigatoR\Desktop\em\server.starter.ui\obj\x64\Debug\server.starter.ui.csprojResolveAssemblyReference.cache
-C:\Users\NavigatoR\Desktop\em\server.starter.ui\obj\x64\Debug\server.starter.ui.Form1.resources
-C:\Users\NavigatoR\Desktop\em\server.starter.ui\obj\x64\Debug\server.starter.ui.Properties.Resources.resources
-C:\Users\NavigatoR\Desktop\em\server.starter.ui\obj\x64\Debug\server.starter.ui.csproj.GenerateResource.Cache
