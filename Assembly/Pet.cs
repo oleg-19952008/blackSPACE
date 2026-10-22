@@ -2,6 +2,8 @@
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
+using Do.game; // User (Program.Users)
+using Do.serverGame; // Map, Alien (Program.Maps)
 
 namespace Do.Assembly
 {

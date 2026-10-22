@@ -3,7 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
-using Do.game;
+using Do.game; // User (Program.Users)
+using Do.serverGame; // Map (Program.Maps)
 
 namespace Do.Assembly
 {

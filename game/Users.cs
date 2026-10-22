@@ -16,13 +16,13 @@ namespace Do.game
 {
 /*
  * Основной partial-class User.
- * Поля состояния и конструктор - в Users.State.cs, логика разнесена по файлам Users.*.cs.
+ * Объявление класса: все члены (поля/методы) находятся в других partial-файлах Users.*.cs
+ * (Users.State.cs, Users.Sending.cs, Users.Misc.cs, Users.PvE.cs и т.д.).
  */
-    class User
+    partial class User
     {
         Socket _handler;
         private readonly byte[] _buffer = new byte[2048];
         private bool _userAuth;
-
     }
 }
