@@ -100,7 +100,7 @@ namespace Do.serverGame
         private bool IsInFactionSecureZone(ushort factionId, int x, int y)
         {
             Dictionary<ushort, int[]> zones;
-            if (!FactionSecureZones.TryGetValue(factionId, out zones)) return false;
+            if (!FactionSecureZones.TryGetValue((short)factionId, out zones)) return false;
             int[] center;
             if (!zones.TryGetValue(_id, out center)) return false;
             return Distance.Get(center[0], x, center[1], y) < FactionSecureRadius;
