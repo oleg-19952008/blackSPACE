@@ -22,9 +22,31 @@ namespace Do.game
         private bool _isboss;
         private bool _canLoadHellstorm = true;
         public bool DestroyedClass = false;
-        private readonly int[] _mmoXy = { 1000, 1000, 1 };
-        private readonly int[] _eicXy = { 19800, 1000, 5 };
-        private readonly int[] _vruXy = { 19600, 11900, 9 };
+        // Spaceball (стационарные боевые станции MMO/EIC/VRU).
+        // Координаты НИЖЕ — это НЕ поле spaceball и НЕ ворота: это позиции самих
+        // станций на картах 1-1 / 5-1 / 9-9 (фракционные NPC-станции). Они взяты
+        // один-в-один из пакета "0|s|0|1|...|<x>|<y>", который сервер рассылает
+        // клиенту в sendStations(), и точно такие же значения ({1000,1000,1},
+        // {19800,1000,5}, {19600,11900,9}) лежали в _mmoXy/_eicXy/_vruXy в
+        // исходном коде (до правок). Поле самого spaceball (карта 4-4, ворота
+        // сверху/снизу/слева у края карты и мяч в центре) сервером не моделируется
+        // — оно целиком на стороне клиента/движка, менять там нечего.
+        // factionId 1 -> MMO (1-1), 2 -> EIC (5-1), 3 -> VRU (9-9).
+        public static readonly int[][] SpaceballStations =
+        {
+            new int[] { 1, 1000, 1000, 1 },     // MMO  (1-1)
+            new int[] { 2, 19800, 1000, 5 },    // EIC  (5-1)
+            new int[] { 3, 19600, 11900, 9 },   // VRU  (9-9)
+        };
+
+        public static int[] FindSpaceballStation(int factionOrMap, bool byFaction)
+        {
+            foreach (var st in SpaceballStations)
+                if (byFaction ? st[0] == factionOrMap : st[3] == factionOrMap)
+                    return st;
+            return null;
+        }
+
         public bool GodMode = false;
         public int LastPing = 0;
         public int Blk = 0;
@@ -283,9 +305,13 @@ namespace Do.game
                         // Сбрасываем снимок фонового БД-синхронизатора (см. SyncWithDatabase):
                         // при повторном входе LoadConfigs() загрузит актуальные значения из
                         // базы, а старый снимок прошлого сеанса вызвал бы ложные "изменения".
-                        _dbAmmoSnapshot = null;
+                        _dbInventoryHash = null;
+                        _dbEquipmentHash = null;
                         _dbUri = int.MinValue;
                         _dbCredits = int.MinValue;
+                        _dbExp = int.MinValue;
+                        _dbHonor = int.MinValue;
+                        _dbLevel = int.MinValue;
                         _lastDbSyncCheck = DateTime.MinValue;
 
                         var userRow = Program.CheckSession(UserId, sessionId);
@@ -740,6 +766,25 @@ namespace Do.game
                             var rocketId = packetParser.GetUShort();
                             if (rocketId < 5)
                                 RocketId = rocketId;
+                        }
+                        #endregion
+                        #region Spaceball (боевые станции MMO/EIC/VRU)
+                        // Клиент шлёт "n|s|<faction>" при переходе на станцию.
+                        // БЫЛО: пакет не обрабатывался вообще (и закомментированная
+                        // рассылка "0|n|ssc|" в SendUserShit) — переходы на станции
+                        // работали только за счёт доверия клиентским координатам.
+                        // СТАЛО: сервер сам валидирует фракцию/карту и выполняет
+                        // пересадку игрока (SetSpaceball), клиенту отправляется
+                        // подтверждение "0|m|..." + список станций новой карты.
+                        else if (packetHeader == "n")
+                        {
+                            var sub = packetParser.GetString();
+                            if (sub == "s")
+                            {
+                                int faction = 0;
+                                int.TryParse(packetParser.GetString(), out faction);
+                                SetSpaceball(faction);
+                            }
                         }
                         #endregion
                         #region Settings
@@ -1912,16 +1957,53 @@ namespace Do.game
         private CancellationTokenSource _pingCts;
         public int[] GetXY()
         {
-            int id = Ship.factionId;
-            if (id == 1)
+            // ПОВЕДЕНИЕ СОХРАНЕНО КАК В ИСХОДНИКЕ (_mmoXy/_eicXy/_vruXy):
+            // возвращаем координаты станции фракции игрока. Это осознанная схема
+            // данного сервера: точка сохранения/респауна — всегда своя база
+            // (фактические x/y из БД при входе всё равно перезаписываются на
+            // станцию в Login, см. "0|s|..." и SetSpaceball).
+            // Отличие от прежней правки: Ship.x/Ship.y синхронизируются со
+            // станцией, чтобы пакет выхода ("UPDATE ... SET x,y,mapId") писал
+            // ровно те же значения, что и раньше, — без рассинхрана позиции.
+            var st = FindSpaceballStation(Ship.factionId, true);
+            if (st != null)
             {
-                return _mmoXy;
+                Ship.x = st[1];
+                Ship.y = st[2];
+                return new int[] { st[1], st[2], st[3] };
             }
-            if (id == 2)
+            return new int[] { Ship.x, Ship.y, MapId };
+        }
+
+        // Переход на боевую станцию фракции (spaceball): пакет клиента "n|s|<faction>".
+        // Валидируем фракцию и наличие карты, иначе клиент мог бы запросить любую
+        // станцию/несуществующую карту. Возвращает true при успешном переходе.
+        public bool SetSpaceball(int factionId)
+        {
+            var st = FindSpaceballStation(factionId, true);
+            if (st == null) return false;
+            ushort mapId = (ushort)st[3];
+            if (!Program.Maps.ContainsKey(mapId)) return false;
+
+            try
             {
-                return _eicXy;
+                // Сходно с портал-перемещением (Map.SendPortals): снимаем игрока со
+                // старой карты (соседи получают "0|K|"), затем добавляем на новую —
+                // AddUser сам разошлёт RDY|I всем на станции и проставит inRange.
+                Program.Maps[MapId].RemoveUser(UserId);
+                MapId = mapId;
+                Ship.x = st[1];
+                Ship.y = st[2];
+                Program.Maps[MapId].AddUser(UserId);
+                sendStations();
+                return true;
             }
-            return _vruXy;
+            catch (Exception e)
+            {
+                Out.WriteLine("SetSpaceball failed for user " + UserId + ": " + e.Message,
+                              "User.Spaceball", ConsoleColor.DarkYellow);
+                return false;
+            }
         }
 
         public void discconectUser(int reason = 0)
@@ -5139,12 +5221,32 @@ namespace Do.game
         public static int changed_ = 0;
 
         #region Background DB sync (каждые 30 сек)
-        // Фоновая проверка: изменились ли ресурсы/вооружение в БД (например, покупка
-        // в магазине или сбор через другой клиент), и доводка состояния клиента.
+        // Фоновая проверка: изменилось ли ЧТО ЛИБО в БД (покупки в магазине/ангаре,
+        // замена снаряжения/дройдов с другого клиента и т.п.) и доводка состояния клиента.
+        // Отслеживаются ВСЕ игровые таблицы, влияющие на бой/инвентарь:
+        //   * server_1_player_all_items (все lootid: боеприпасы, лазеры, щиты, дроиды...)
+        //   * server_1_hangar_config_ship (снаряжение: пушки/щиты/процессоры/хайтеки)
+        //   * server_1_player_drones (дройды, например zeus)
+        //   * server_1_hangar_config_drones (привязка дройдов к конфигам)
+        //   * server_1_player_nanotech (нано-технологии ELAA/ECIA/RPMA/SBU/BRB)
+        //   * server_1_players (ресурсы uri/credits, опыт, уровень, ранг)
         private DateTime _lastDbSyncCheck = DateTime.MinValue;
-        private Dictionary<string, int> _dbAmmoSnapshot = null;   // lootid -> Q
+        private string _dbInventoryHash = null;      // снимок строки инвентаря (lootid:Q)
+        private string _dbEquipmentHash = null;      // снимок снаряжения (конфиги + дроиды + нано)
         private int _dbUri = int.MinValue, _dbCredits = int.MinValue;
+        private int _dbExp = int.MinValue, _dbHonor = int.MinValue, _dbLevel = int.MinValue;
         private const int DbSyncIntervalMs = 30000;
+
+        private static string Md5Hex(string input)
+        {
+            using (var md5 = System.Security.Cryptography.MD5.Create())
+            {
+                var bytes = md5.ComputeHash(Encoding.UTF8.GetBytes(input));
+                var sb = new StringBuilder(bytes.Length * 2);
+                foreach (var b in bytes) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+        }
 
         private void SyncWithDatabase()
         {
@@ -5157,100 +5259,134 @@ namespace Do.game
             {
                 using (var dbClient = Program.Manager.getQueryreactor())
                 {
-                    // ---- 1. Боеприпасы/вооружение (ammunition_%) ----
-                    var res = (DataTable)dbClient.query("SELECT lootid,Q FROM server_1_player_all_items WHERE server_1_player_all_items.playerID=" + UserId + " AND server_1_player_all_items.lootid LIKE 'ammunition_%'");
-                    var fresh = new Dictionary<string, int>();
-                    foreach (DataRow row in res.Rows)
-                    {
-                        int qv;
-                        if (int.TryParse(row["Q"].ToString(), out qv))
-                            fresh[row["lootid"].ToString()] = qv;
-                    }
+                    bool inventoryChanged = false;
+                    bool equipmentChanged = false;
+                    bool profileChanged = false;
 
-                    bool changed = false;
-                    if (_dbAmmoSnapshot == null)
+                    // ---- 1. Инвентарь: боеприпасы (ammunition_%) ----
+                    // Сравниваем хеш ВСЕХ строк боеприпасов: покупка в магазине меняет Q,
+                    // а новая покупка добавляет строку — любое изменение ловится сразу.
+                    var res = (DataTable)dbClient.query("SELECT lootid,Q FROM server_1_player_all_items WHERE server_1_player_all_items.playerID=" + UserId + " AND server_1_player_all_items.lootid LIKE 'ammunition_%'");
+                    var parts = new List<string>();
+                    foreach (DataRow row in res.Rows)
+                        parts.Add(row["lootid"].ToString() + ":" + row["Q"].ToString());
+                    parts.Sort(StringComparer.Ordinal);
+                    var invHash = Md5Hex(string.Join(",", parts.ToArray()));
+                    if (_dbInventoryHash == null)
                     {
                         // Первый пропуск после логина: LoadConfigs()/вход уже загрузили
                         // актуальные значения — просто запоминаем снимок, ничего не трогаем.
-                        _dbAmmoSnapshot = fresh;
+                        _dbInventoryHash = invHash;
                     }
-                    else
+                    else if (_dbInventoryHash != invHash)
                     {
-                        foreach (var kv in fresh)
-                        {
-                            int oldq;
-                            if (_dbAmmoSnapshot.TryGetValue(kv.Key, out oldq) && oldq == kv.Value) continue;
-                            changed = true;
-                            ApplyAmmoFromDb(kv.Key, kv.Value);
-                        }
-                        foreach (var key in _dbAmmoSnapshot.Keys)
-                        {
-                            if (!fresh.ContainsKey(key)) { changed = true; break; }
-                        }
-                        _dbAmmoSnapshot = fresh;
+                        _dbInventoryHash = invHash;
+                        inventoryChanged = true;
                     }
 
-                    if (changed)
+                    // ---- 2. Снаряжение: ангарные конфиги, дроиды, привязки, нанотех ----
+                    var eqParts = new List<string>();
+                    foreach (uint cfgNum in new uint[] { 1, 2 })
                     {
-                        // Пересчёт зависимых значений (ISHA/SMBA из ACM-01) — как в LoadConfigs().
-                        if (Ship.ACM01 != 0)
-                        {
-                            double Ammo = Ship.ACM01 / 10;
-                            Ship.ISHA = (int)Math.Truncate(Ammo);
-                            Ship.SMBA = (int)Math.Truncate(Ammo);
-                        }
-                        // Синхронизация клиента пакетами того же формата, что при входе:
-                        Send("0|B|" + Ship.x1 + "|" + Ship.x2 + "|" + Ship.x3 + "|" + Ship.UCB100 + "|" + Ship.sab + "|" + Ship.rsb);
-                        SendSpAmmo();
-                        Send("0|RL|R|" + Ship.HSTRM01 + "|" + Ship.UBR100 + "|" + Ship.ECO10);
+                        var eq = (DataTable)dbClient.query("SELECT lasers,generators,heavy_guns,extras FROM server_1_hangar_config_ship WHERE playerID=" + UserId + " AND configNum=" + cfgNum);
+                        foreach (DataRow row in eq.Rows)
+                            eqParts.Add("cfg" + cfgNum + "=" + row["lasers"] + "/" + row["generators"] + "/" + row["heavy_guns"] + "/" + row["extras"]);
+                    }
+                    var dr = (DataTable)dbClient.query("SELECT drone_kind,drone_level FROM server_1_player_drones WHERE playerID=" + UserId + " ORDER BY id");
+                    foreach (DataRow row in dr.Rows)
+                        eqParts.Add("d=" + row["drone_kind"] + ":" + row["drone_level"]);
+                    var cd = (DataTable)dbClient.query("SELECT * FROM server_1_hangar_config_drones WHERE playerID=" + UserId + " ORDER BY configNum");
+                    foreach (DataRow row in cd.Rows)
+                    {
+                        var rp = new List<string>();
+                        foreach (DataColumn c in cd.Columns) rp.Add(Convert.ToString(row[c]));
+                        eqParts.Add("cd=" + string.Join(":", rp.ToArray()));
+                    }
+                    var nt = (DataTable)dbClient.query("SELECT slot_one,slot_two,slot_three FROM server_1_player_nanotech WHERE playerId=" + UserId);
+                    foreach (DataRow row in nt.Rows)
+                        eqParts.Add("nt=" + row["slot_one"] + "/" + row["slot_two"] + "/" + row["slot_three"]);
+                    eqParts.Sort(StringComparer.Ordinal);
+                    var eqHash = Md5Hex(string.Join("|", eqParts.ToArray()));
+                    if (_dbEquipmentHash == null)
+                    {
+                        _dbEquipmentHash = eqHash;
+                    }
+                    else if (_dbEquipmentHash != eqHash)
+                    {
+                        _dbEquipmentHash = eqHash;
+                        equipmentChanged = true;
                     }
 
-                    // ---- 2. Ресурсы (uri/credits) ----
-                    var pdata = (DataTable)dbClient.query("SELECT uri,credits FROM server_1_players WHERE playerID=" + UserId);
+                    // ---- 3. Профиль: ресурсы/опыт/уровень (БД — источник истины) ----
+                    var pdata = (DataTable)dbClient.query("SELECT uri,credits,exp,honor,level FROM server_1_players WHERE playerID=" + UserId);
                     if (pdata.Rows.Count == 1)
                     {
-                        int dbUri = Convert.ToInt32(pdata.Rows[0]["uri"]);
-                        int dbCredits = Convert.ToInt32(pdata.Rows[0]["credits"]);
-                        if (dbUri != _dbUri || dbCredits != _dbCredits)
+                        var r0 = pdata.Rows[0];
+                        int dbUri = Convert.ToInt32(r0["uri"]);
+                        int dbCredits = Convert.ToInt32(r0["credits"]);
+                        int dbExp = Convert.ToInt32(r0["exp"]);
+                        int dbHonor = Convert.ToInt32(r0["honor"]);
+                        int dbLevel = Convert.ToInt32(r0["level"]);
+                        if (dbUri != _dbUri || dbCredits != _dbCredits ||
+                            dbExp != _dbExp || dbHonor != _dbHonor ||
+                            dbLevel != _dbLevel)
                         {
-                            _dbUri = dbUri;
-                            _dbCredits = dbCredits;
+                            profileChanged = true;
+                            _dbUri = dbUri; _dbCredits = dbCredits;
+                            _dbExp = dbExp; _dbHonor = dbHonor;
+                            _dbLevel = dbLevel;
                             Ship.uri = dbUri;
                             Ship.credits = dbCredits;
-                            // Полный профиль (тот же пакет, что при входе) — обновляет
-                            // счётчики ресурсов в UI клиента. HP/shield здесь берутся из
-                            // текущих серверных значений, поэтому перетирания нет.
-                            UpdateShip();
+                            Ship.exp = dbExp;
+                            Ship.honor = dbHonor;
+                            Ship.level = dbLevel;
                         }
+                    }
+
+                    // ---- 4. Применение изменений ----
+                    if (equipmentChanged || inventoryChanged)
+                    {
+                        // Полная перезагрузка снаряжения/дроидов/боеприпасов из БД — тот же
+                        // путь, что при входе (пушки, щиты, процессоры, хайтеки, дроиды).
+                        LoadConfigs();
+                    }
+
+                    if (inventoryChanged || equipmentChanged || profileChanged)
+                    {
+                        // Рассылка клиенту тех же пакетов, что при входе (SendUserShit):
+                        // UpdateShip() шлёт профиль HwkU|I (ресурсы/характеристики корабля).
+                        UpdateShip();
+                        // Боеприпасы: лазеры (0|B|), ракеты/шахты/мин (0|RL|R|, 0|3|)
+                        Send("0|B|" + Ship.x1 + "|" + Ship.x2 + "|" + Ship.x3 + "|" + Ship.UCB100 + "|" + Ship.sab + "|" + Ship.rsb);
+                        Send("0|RL|R|" + Ship.HSTRM01 + "|" + Ship.UBR100 + "|" + Ship.ECO10);
+                        SendSpAmmo();
+                        // Слоты REPCPU/ISICPU/AROCPU (реботы и процессоры из ангара)
+                        Send("0|A|ITM|0|0|0|0|" + Ship.RepBot + "|0|0|" + Program.ToEnum(Ship.SMBCPU) + "|" + Program.ToEnum(Ship.ISHCPU) + "|0|0|" + Program.ToEnum(Ship.AROCKET) + "|0|0|0|0|0");
+                        // Нанотехнологии (ELAA/ECIA/RPMA/SBUA/BRBA)
+                        Send("0|TX|S|" + ((Ship.ELAA != 0) ? "1" : "0") + "|" + Ship.ELAA + "|0|" + ((Ship.ECIA != 0) ? "1" : "0") + "|" + Ship.ECIA + "|0|" + ((Ship.RPMA != 0) ? "1" : "0") + "|" + Ship.RPMA + "|0|" + ((Ship.SBUA != 0) ? "1" : "0") + "|" + Ship.SBUA + "|0|" + ((Ship.BRBA != 0) ? "1" : "0") + "|" + Ship.BRBA + "|0");
+                        // Дройды (например купленный zeus): этому игроку и всем в радиусе.
+                        Send("0|n|d|" + UserId + "|" + Ship.DronePacket);
+                        try
+                        {
+                            foreach (var pair in Program.Maps[MapId].Users)
+                            {
+                                if (pair.Key == UserId) continue;
+                                try { pair.Value.Send("0|n|d|" + UserId + "|" + Ship.DronePacket); }
+                                catch { }
+                            }
+                        }
+                        catch { }
+
+                        Out.WriteLine("DB sync: changes detected for user " + UserId +
+                                      " (inventory=" + inventoryChanged + ", equipment=" + equipmentChanged +
+                                      ", profile=" + profileChanged + ")", "User.DbSync", ConsoleColor.Cyan);
                     }
                 }
             }
             catch (Exception e)
             {
-                // Фоновая синхронизация не должна ронать цикл UpdateShip_.
+                // Фоновая синхронизация не должна ронять цикл UpdateShip_.
                 Out.WriteLine("SyncWithDatabase failed for user " + UserId + ": " + e.Message, "User.DbSync", ConsoleColor.DarkYellow);
-            }
-        }
-
-        private void ApplyAmmoFromDb(string lootid, int quantity)
-        {
-            switch (lootid)
-            {
-                case "ammunition_laser_lcb-10": Ship.x1 = quantity; break;
-                case "ammunition_laser_mcb-25": Ship.x2 = quantity; break;
-                case "ammunition_laser_mcb-50": Ship.x3 = quantity; break;
-                case "ammunition_laser_ucb-100": Ship.UCB100 = quantity; break;
-                case "ammunition_laser_rsb-75": Ship.rsb = quantity; break;
-                case "ammunition_laser_sab-50": Ship.sab = quantity; break;
-                case "ammunition_rocket_plt-2021": Ship.PLT2021 = quantity; break;
-                case "ammunition_rocket_plt-3030": Ship.PLT3030 = quantity; break;
-                case "ammunition_rocket_plt-2026": Ship.PLT2026 = quantity; break;
-                case "ammunition_rocket_r-310": Ship.R310 = quantity; break;
-                case "ammunition_specialammo_emp-01": Ship.EMPA = quantity; break;
-                case "ammunition_rocketlauncher_eco-10": Ship.ECO10 = quantity; break;
-                case "ammunition_rocketlauncher_ubr-100": Ship.UBR100 = quantity; break;
-                case "ammunition_rocketlauncher_hstrm-01": Ship.HSTRM01 = quantity; break;
-                case "ammunition_mine_acm-01": Ship.ACM01 = quantity; break;
             }
         }
         #endregion
