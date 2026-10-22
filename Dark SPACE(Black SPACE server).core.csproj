@@ -97,7 +97,11 @@
     <Compile Include="serverGame\AlienClasses\AlienMovement.cs" />
     <Compile Include="serverGame\Aliens.cs" />
     <Compile Include="serverGame\Box.cs" />
-    <Compile Include="serverGame\Maps.cs" />
+    <Compile Include="serverGame\Maps.Core.cs" />
+    <Compile Include="serverGame\Maps.Movement.cs" />
+    <Compile Include="serverGame\Maps.Objects.cs" />
+    <Compile Include="serverGame\Maps.Portals.cs" />
+    <Compile Include="serverGame\Maps.Users.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config">
