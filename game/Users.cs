@@ -62,7 +62,36 @@ namespace Do.game
         public List<uint> LaserCooldownList = new List<uint>();
         private int _damageTaken;
         public static Dictionary<uint, User> Users;
-        public static int online = 0;
+        // Счетчик онлайна изменяется из потоков обработки сокетов и фоновых циклов,
+        // поэтому операции инкремента/декремента должны быть атомарными (Interlocked).
+        private static int _online = 0;
+        public static int online
+        {
+            get { return System.Threading.Interlocked.CompareExchange(ref _online, 0, 0); }
+            set { System.Threading.Interlocked.Exchange(ref _online, value); }
+        }
+        public static void IncrementOnline()
+        {
+            System.Threading.Interlocked.Increment(ref _online);
+        }
+        // Флаг "этот пользователь учтён в счётчике онлайна" (1 — учтён, 0 — снят).
+        // Гарантирует, что декремент выполняется ровно один раз на сессию.
+        private int _onlineCounted = 0;
+        public void MarkOnlineCounted()
+        {
+            System.Threading.Interlocked.Exchange(ref _onlineCounted, 1);
+        }
+        // Потокобезопасный декремент: никогда не уходит в отрицательные значения.
+        public static void DecrementOnline()
+        {
+            int current;
+            do
+            {
+                current = System.Threading.Interlocked.CompareExchange(ref _online, 0, 0);
+                if (current <= 0) return;
+            }
+            while (System.Threading.Interlocked.CompareExchange(ref _online, current - 1, current) != current);
+        }
         #region usersClass
         public Clan Clan;
         public Ship Ship;
@@ -83,11 +112,17 @@ namespace Do.game
         public static int User_id___ = 0;
         public async void UpdateShip_()
         {
+            // БЫЛО: while(true) без задержки и без проверки выхода — бесконечный
+            // "fire-and-forget" цикл в async void, который продолжал слать пакеты
+            // уже отключённому игроку (спам в лог/сокет после дисконнекта).
+            // СТАЛО: цикл останавливается при закрытии сокета/уничтожении класса.
+            // ВАЖНО: здесь отправляются только speed/бустеры/снаряжение — НИКАКИХ
+            // пакетов HP (HPT/HL/N/RDY|I), чтобы не перетирать актуальное HP корабля
+            // на клиенте (см. регрессию "корабль без хп").
             Send("0|A|BS|0/0/" + Ship.dmgbooster + "/" + Ship.shieldbooster + "/0/0/0/" + Ship.hpbooster);
             try
             {
-
-                while (true)
+                while (!_socketClosed && !DestroyedClass && !_destroyed)
                 {
                     Send("0|A|v|" + Ship.speed);
                     //if (Ship.rank == 21)
@@ -233,7 +268,15 @@ namespace Do.game
                         UserId = packetParser.GetUInt();
                         var sessionId = packetParser.GetULong();
                         _userAuth = true;
-                        online++;
+                        IncrementOnline();
+                        MarkOnlineCounted();
+                        // Сбрасываем флаги разрушения: этот же объект User может быть
+                        // повторно авторизован после "first login" сброса (discconectUser()
+                        // ниже по этому же обработке). Без сброса _destroyed/флаг входа
+                        // новый цикл checkPing завершился бы мгновенно, соединение разорвалось,
+                        // а HP корабля не успело бы сохраниться в БД ("корабль без хп").
+                        _destroyed = false;
+                        System.Threading.Interlocked.Exchange(ref _disconnectStarted, 0);
 
                         var userRow = Program.CheckSession(UserId, sessionId);
                         if (userRow == null)
@@ -1304,41 +1347,74 @@ namespace Do.game
 
         private async void Venom(uint userId)
         {
-            while (true)
+            // БЫЛО: while(true) без задержки на первой итерации и без try/catch —
+            // любое исключение "тихо" убивало async void, а при быстрой смерти цели
+            // цикл мог крутиться без паузы. СТАЛО: проверяем условие выхода ДО тела,
+            // задержка есть на каждой итерации, ошибки логируются, отмена по CancellationToken.
+            var token = _venomCts.Token;
+            // Снимок HP на момент входа: Venom снимает HP серверного корабля каждые ~1.1с,
+            // но клиент синхронизирует полоску HP только пакетами HPT/HL (см. регрессию
+            // "корабль не имеет хп"). Поэтому каждый тик шлём и "0|A|HPT|hp|max|uid",
+            // чтобы клиентская полоска не оставалась с рассинхронизированным значением.
+            uint lastReportedHp = Ship.HP;
+            try
             {
-                if (DestroyedClass || Ship.Singularity == false)
+                while (!token.IsCancellationRequested && !DestroyedClass && Ship.Singularity)
+                {
+                    await Task.Delay(1100, token);
+
+                    var sing = Convert.ToUInt32(Program.Random.Next(2500, 3000));
+                    if (Ship.HP - sing < 1)
+                    {
+                        foreach (var ship in PlayersInRange)
+                        {
+                            Program.Users[ship].Send("0|K|" + UserId);
+                        }
+                        discconectUser();
+                        Program.RemoveUser(UserId);
+                        Program.Maps[MapId].Users.Remove(UserId);
+                        break;
+                    }
+                    else
+                    {
+                        Ship.HP -= sing;
+
+                        var packet2 = "0|Y|" + userId + "|" + UserId + "|L|" + Ship.HP + "|" + Ship.shield + "|" + sing + "|100|1";
+                        foreach (var ship in PlayersInRange.Where(ship => Program.Users[ship].Ship.selectedUserId == Ship.selectedUserId || Ship.selectedUserId == ship))
+                        {
+                            Program.Users[ship].Send(packet2);
+                        }
+
+                        // Синхронизация клиентской полоски HP (см. комментарий выше).
+                        if (Ship.HP != lastReportedHp)
+                        {
+                            Send("0|A|HPT|" + Ship.HP + "|" + Ship.maxHP + "|" + UserId);
+                            lastReportedHp = Ship.HP;
+                        }
+                    }
+                }
+
+                // Деактивация эффекта на клиенте отправляем ВСЕГДА при выходе из цикла
+                // (в т.ч. после отмены токена), а не только пока Singularity ещё true —
+                // иначе у игроков останется "висячий" индикатор способностей.
+                if (!DestroyedClass)
                 {
                     foreach (var ship in PlayersInRange)
                     {
                         Program.Users[ship].Send("0|SD|D|R|5|" + UserId);
                     }
-                    break;
                 }
-                var sing = Convert.ToUInt32(Program.Random.Next(2500, 3000));
-                if (Ship.HP - sing < 1)
-                {
-                    foreach (var ship in PlayersInRange)
-                    {
-                        Program.Users[ship].Send("0|K|" + UserId);
-                    }
-                    discconectUser();
-                    Program.RemoveUser(UserId);
-                    Program.Maps[MapId].Users.Remove(UserId);
-                }
-                else
-                {
-                    Ship.HP -= sing;
-
-                    var packet2 = "0|Y|" + userId + "|" + UserId + "|L|" + Ship.HP + "|" + Ship.shield + "|" + sing + "|100|1";
-                    foreach (var ship in PlayersInRange.Where(ship => Program.Users[ship].Ship.selectedUserId == Ship.selectedUserId || Ship.selectedUserId == ship))
-                    {
-                        Program.Users[ship].Send(packet2);
-                    }
-                }
-
-                await Task.Delay(1100);
+            }
+            catch (OperationCanceledException)
+            {
+                // Нормальная отмена (пользователь отключился).
+            }
+            catch (Exception e)
+            {
+                Out.WriteLine("Venom loop error: " + e.Message, "User.Venom", ConsoleColor.Red);
             }
         }
+        private readonly CancellationTokenSource _venomCts = new CancellationTokenSource();
 
         private async void DiminisherCooldown()
         {
@@ -1750,7 +1826,12 @@ namespace Do.game
 
         private async void DiscconectUserInactivity(bool withPing = true)
         {
-            online--;
+            // Декремент выполняем ровно один раз на пользователя (см. _onlineCounted),
+            // иначе повторные вызовы уводят счётчик онлайна в минус.
+            if (System.Threading.Interlocked.Exchange(ref _onlineCounted, 0) == 1)
+            {
+                DecrementOnline();
+            }
             try
             {
                 if (Ship.sockclos) return;
@@ -1764,6 +1845,8 @@ namespace Do.game
                     }
                     _socketClosed = true;
                     DestroyedClass = true;
+                    _destroyed = true;
+                    try { if (_pingCts != null) _pingCts.Cancel(); } catch (ObjectDisposedException) { }
                     _handler = null;
                     Program.Maps[MapId].RemoveUser(UserId);
                     Program.RemoveUser(UserId);
@@ -1779,22 +1862,44 @@ namespace Do.game
         }
         private async void checkPing()
         {
+            // БЫЛО: рекурсивный self-call после await — каждый цикл порождал новый
+            // async void, стек задач/таймеров рос бесконечно и отмена была невозможна.
+            // СТАЛО: итеративный цикл с CancellationTokenSource; при завершении соединения
+            // токен отменяется и цикл гарантированно останавливается (без утечки).
             try
             {
                 if (Ship.sockclos) return;
-                await Task.Delay(2610); //await Task.Delay(26100);
-                if (Program.GetUnixTimestamp - LastPing >= 28)
+
+                using (var cts = new CancellationTokenSource())
                 {
-                    //Out.WriteLine("Losed connection with userId: " + this.userId, this.IP, ConsoleColor.DarkYellow);
-                    _socketClosed = true;
-                    DiscconectUserInactivity();
-                    return;
+                    _pingCts = cts;
+                    while (!_socketClosed && !_destroyed)
+                    {
+                        await Task.Delay(2610, cts.Token); //await Task.Delay(26100);
+                        if (Program.GetUnixTimestamp - LastPing >= 28)
+                        {
+                            //Out.WriteLine("Losed connection with userId: " + this.userId, this.IP, ConsoleColor.DarkYellow);
+                            _socketClosed = true;
+                            DiscconectUserInactivity();
+                            return;
+                        }
+                    }
                 }
-                checkPing();
+            }
+            catch (OperationCanceledException)
+            {
+                // Нормальное завершение цикла по отмене токена.
             }
             catch (Exception)
             { }
+            finally
+            {
+                _pingCts = null;
+            }
         }
+        private volatile bool _destroyed = false;
+        private int _disconnectStarted = 0;
+        private CancellationTokenSource _pingCts;
         public int[] GetXY()
         {
             int id = Ship.factionId;
@@ -1811,6 +1916,16 @@ namespace Do.game
 
         public void discconectUser(int reason = 0)
         {
+            // Защита от повторного входа: гонка двух потоков (таймаут пинга + ошибка сокета)
+            // иначе снимала бы онлайн дважды и писала в БД одно и то же соединение дважды.
+            if (System.Threading.Interlocked.Exchange(ref _disconnectStarted, 1) == 1) return;
+
+            // Потокобезопасный однократный декремент онлайна:
+            // Interlocked.Exchange гарантирует, что гонка потоков не снимет счётчик дважды.
+            if (System.Threading.Interlocked.Exchange(ref _onlineCounted, 0) == 1)
+            {
+                DecrementOnline();
+            }
             try
             {
 
@@ -1855,6 +1970,8 @@ namespace Do.game
             _socketClosed = true;
 
             DestroyedClass = true;
+            _destroyed = true;
+            try { if (_pingCts != null) _pingCts.Cancel(); } catch (ObjectDisposedException) { }
             Program.RemoveUser(UserId);
         }
 
@@ -1980,107 +2097,125 @@ namespace Do.game
         //    Send("0|B|" + Ship.x1 + "|" + Ship.x2 + "|" + Ship.x3 + "|" + Ship.UCB100 + "|" + Ship.sab + "|" + Ship.rsb);
         //    await Task.Delay(1);       
         //}
-        private async void UpdateLaser()
+        // Универсальное сохранение количества боеприпаса в БД.
+        // ВАЖНО: runQuery() теперь пробрасывает DatabaseException (корректный rollback
+        // транзакций). Вызывающие UpdateLaser()/UpdateRocket() выполняются напрямую из
+        // обработки пакетов атаки (ReadCallback) без try/catch: любое исключение отсюда
+        // раньше молча обрывало цепочку ДО финальной синхронизации клиента
+        // ("0|B|..." / SendSpAmmo) — купленные в магазине PLT-3030 не отображались в
+        // космосе, а часть логики пакета не доисполнялась. Ошибку логируем, но синхронизацию
+        // выполняем ВСЕГДА; loadAmmos() на каждом выстреле перечитывает счётчик из БД,
+        // поэтому сбойная запись не копит рассинхрон серверного кэша.
+        private bool SaveAmmoCount(string lootid, int quantity)
         {
-            Ship.x1 = Program.loadAmmos(UserId, "ammunition_laser_lcb-10");
-            Ship.x2 = Program.loadAmmos(UserId, "ammunition_laser_mcb-25");
-            Ship.x3 = Program.loadAmmos(UserId, "ammunition_laser_mcb-50");
-            Ship.UCB100 = Program.loadAmmos(UserId, "ammunition_laser_ucb-100");
-            Ship.rsb = Program.loadAmmos(UserId, "ammunition_laser_rsb-75");
-            Ship.sab = Program.loadAmmos(UserId, "ammunition_laser_sab-50");
+            try
+            {
+                using (var dbClient = Program.Manager.getQueryreactor())
+                {
+                    dbClient.query("UPDATE server_1_player_all_items SET Q = '" + quantity + "' WHERE playerID = '" + UserId + "' AND lootid = '" + lootid + "'");
+                }
+                return true;
+            }
+            catch (Exception e)
+            {
+                Out.WriteLine("SaveAmmoCount failed [" + lootid + "]: " + e.Message, "User.UpdateAmmo", ConsoleColor.DarkYellow);
+                return false;
+            }
+        }
+
+        // Флаг "последняя запись боеприпасов в БД не удалась": пока он сброшен,
+        // серверные счётчики (Ship.*) перезагружаются из БД на каждом выстреле;
+        // при сбое записи серверное значение сохраняется, чтобы перезагрузка из
+        // устаревшей строки БД не отменяла покупку ("купил PLT-3030 — пропали").
+        private bool _ammoDbDirty = false;
+
+        private void UpdateLaser()
+        {
+            int dbX1 = Program.loadAmmos(UserId, "ammunition_laser_lcb-10");
+            int dbX2 = Program.loadAmmos(UserId, "ammunition_laser_mcb-25");
+            int dbX3 = Program.loadAmmos(UserId, "ammunition_laser_mcb-50");
+            int dbUcb100 = Program.loadAmmos(UserId, "ammunition_laser_ucb-100");
+            int dbRsb = Program.loadAmmos(UserId, "ammunition_laser_rsb-75");
+            int dbSab = Program.loadAmmos(UserId, "ammunition_laser_sab-50");
+            if (!_ammoDbDirty)
+            {
+                Ship.x1 = dbX1;
+                Ship.x2 = dbX2;
+                Ship.x3 = dbX3;
+                Ship.UCB100 = dbUcb100;
+                Ship.rsb = dbRsb;
+                Ship.sab = dbSab;
+            }
             switch (LaserId)
             {
                 case 1:
                     Ship.x1 -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.x1 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_lcb-10'");
-                        Thread.Sleep(20);
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_lcb-10", Ship.x1);
                     break;
                 case 2:
                     Ship.x2 -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.x2 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_mcb-25'");
-                        Thread.Sleep(20);
-                    }
-
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_mcb-25", Ship.x2);
                     break;
                 case 3:
                     Ship.x3 -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.x3 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_mcb-50'");
-                        Thread.Sleep(20);
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_mcb-50", Ship.x3);
                     break;
                 case 4:
                     Ship.UCB100 -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.UCB100 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_ucb-100'");
-                        Thread.Sleep(20);
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_ucb-100", Ship.UCB100);
                     break;
                 case 5:
                     Ship.sab -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.sab + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_sab-50'");
-                        Thread.Sleep(20);
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_sab-50", Ship.sab);
                     break;
                 case 6:
                     Ship.rsb -= Ship.lasers;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.rsb + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_laser_rsb-75'");
-                        Thread.Sleep(20);
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_laser_rsb-75", Ship.rsb);
                     break;
                 default:
                     break;
             }
+            // Синхронизация клиента выполняем ВСЕГДА, даже если запись в БД не удалась:
+            // именно этот пакет показывает купленные/расходованные боеприпасы в UI.
             Send("0|B|" + Ship.x1 + "|" + Ship.x2 + "|" + Ship.x3 + "|" + Ship.UCB100 + "|" + Ship.sab + "|" + Ship.rsb+"|1000");
-            await Task.Delay(10);
         }
+
         private void UpdateRocket()
         {
-            Ship.PLT2021 = Program.loadAmmos(UserId, "ammunition_rocket_plt-2021");
-            Ship.PLT3030 = Program.loadAmmos(UserId, "ammunition_rocket_plt-3030");
-            Ship.PLT2026 = Program.loadAmmos(UserId, "ammunition_rocket_plt-2026");
-            Ship.R310 = Program.loadAmmos(UserId, "ammunition_rocket_r-310");
+            // ВАЖНО: loadAmmos() перечитывает ВСЕ боеприпасы из БД. Если предыдущая
+            // запись в БД не удалась (серверный кэш ушёл от базы), перезагрузка
+            // молча ОТМЕНЯЛА покупку: игрок стрелял, а купленные PLT-3030 "пропадали"
+            // и не отображались в космосе. Поэтому при неудачной записи сохраняем
+            // серверное значение, пока БД снова не станет доступна.
+            int dbPlt2021 = Program.loadAmmos(UserId, "ammunition_rocket_plt-2021");
+            int dbPlt3030 = Program.loadAmmos(UserId, "ammunition_rocket_plt-3030");
+            int dbPlt2026 = Program.loadAmmos(UserId, "ammunition_rocket_plt-2026");
+            int dbR310 = Program.loadAmmos(UserId, "ammunition_rocket_r-310");
+            if (!_ammoDbDirty)
+            {
+                Ship.PLT2021 = dbPlt2021;
+                Ship.PLT3030 = dbPlt3030;
+                Ship.PLT2026 = dbPlt2026;
+                Ship.R310 = dbR310;
+            }
             switch (RocketId)
             {
                 case 1:
                     Ship.R310 -= 1;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.R310 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_rocket_r-310'");
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_rocket_r-310", Ship.R310);
                     break;
                 case 2:
                     Ship.PLT2026 -= 1;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.PLT2026 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_rocket_plt-2026'");
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_rocket_plt-2026", Ship.PLT2026);
 
                     break;
                 case 3:
                     Ship.PLT2021 -= 1;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.PLT2021 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_rocket_plt-2021'");
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_rocket_plt-2021", Ship.PLT2021);
                     break;
                 case 4:
                     Ship.PLT3030 -= 1;
-                    using (var dbClient = Program.Manager.getQueryreactor())
-                    {
-                        dbClient.query("UPDATE server_1_player_all_items SET Q = '" + Ship.PLT3030 + "' WHERE playerID = '" + UserId + "' AND lootid = 'ammunition_rocket_plt-3030'");
-                    }
+                    _ammoDbDirty = !SaveAmmoCount("ammunition_rocket_plt-3030", Ship.PLT3030);
                     break;
                     //case 5:
                     //    Ship.sab -= Ship.lasers;
@@ -2186,10 +2321,8 @@ namespace Do.game
             Send("0|n|d|" + UserId + "|" + Ship.DronePacket);
             Send("0|A|STD|Server " + Program.VERSION);
             Send("0|A|STD|Admin`s server SeVeN & NavigatoR");
-            if (online < 0)
-            {
-                online = 1;
-            }
+            // Счётчик больше не может уйти в отрицательные значения (DecrementOnline защищён),
+            // поэтому прежняя "коррекция" online < 0 -> online = 1 удалена как маскирующая баг.
             //   Send("0|A|STD|Онлайн сервера: " + online);
 
             //"0|A|STD|+ текст

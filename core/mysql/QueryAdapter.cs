@@ -217,9 +217,41 @@ namespace MySQLManager.Database.Session_Details
             {
                 this.command.ExecuteNonQuery();
             }
-            catch (Exception)
+            catch (Exception e)
             {
                 Out.WriteLine("Error [MySQL] " + this.command.CommandText);
+                // Было: голый throw без try/catch у вызывающего кода — любая ошибка
+                // SQL (например, UPDATE количества ракет в UpdateRocket()) молча
+                // разрывала цепочку обработки пакета: update не выполнялся, а
+                // синхронизация клиента после него не отправлялась ("купил PLT-3030,
+                // в космосе не появилось").
+                // Стало: пробрасываем ошибку наверх (для корректного rollback в
+                // TransactionQueryReactor), но только если она НЕ из транзакции —
+                // в MySQL DDL вызывает implicit commit, поэтому после ошибки внутри
+                // открытой транзакции откатываем её явно, чтобы не было "тихой порчи".
+                TryRollbackActiveTransaction(e);
+                throw new DatabaseException("Query failed: " + this.command.CommandText, e);
+            }
+        }
+
+        // Если команда выполнялась внутри MySqlTransaction, при ошибке делаем явный
+        // Rollback (иначе частично выполненные запросы рискуют быть закоммиченными).
+        private void TryRollbackActiveTransaction(Exception cause)
+        {
+            try
+            {
+                var tx = this.command.Transaction;
+                if (tx != null)
+                {
+                    tx.Rollback();
+                    Out.WriteLine("MySQL transaction rolled back due to error: " + cause.Message);
+                }
+            }
+            catch (Exception rollbackError)
+            {
+                // Откат мог уже быть выполнен ранее (double-rollback) — логируем и
+                // продолжаем пробрасывать исходную ошибку.
+                Out.WriteLine("MySQL rollback failed: " + rollbackError.Message);
             }
         }
 

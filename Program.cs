@@ -101,15 +101,34 @@ namespace Do
 
         public async void CountUser()
         {
-            while (true)
+            // Инкапсулируем тело в Task: exceptions не "свалятся" в async void,
+            // и цикл можно корректно остановить по CancellationToken.
+            _ = Task.Run(async () =>
             {
-                await Task.Delay(2000);
-                var a = DateTime.Now - Time;
-                var users = Users.Count;
+                while (!_countUserToken.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(2000, _countUserToken);
+                        var a = DateTime.Now - Time;
+                        var users = Users.Count;
 
-                //      Console.Title = users + " game clients connected! - " + Process.GetCurrentProcess().PeakPagedMemorySize/1024 + " KB - Running for " + a.Hours + ":" + a.Minutes + ":" + a.Seconds;
-            }
+                        //      Console.Title = users + " game clients connected! - " + Process.GetCurrentProcess().PeakPagedMemorySize/1024 + " KB - Running for " + a.Hours + ":" + a.Minutes + ":" + a.Seconds;
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception e)
+                    {
+                        Out.WriteLine("CountUser loop error: " + e.Message, "Server.CountUser", ConsoleColor.Red);
+                        break;
+                    }
+                }
+            });
         }
+        private static readonly CancellationTokenSource _countUserCts = new CancellationTokenSource();
+        private static CancellationToken _countUserToken { get { return _countUserCts.Token; } }
 
 
         public static bool ConsoleEventCallback(int eventType)
@@ -136,10 +155,12 @@ namespace Do
 
         public static void RemoveUser(uint userId)
         {
-            Do.game.User.online--;
+            // Декремент онлайна выполняется в User.discconectUser (однократно, потокобезопасно).
+            // Здесь был второй неатомарный online--, из-за чего счётчик уходил в минус.
 
             try
             {
+                if (Users == null || !Users.ContainsKey(userId)) return;
                 Users[userId] = null;
                 Users.Remove(userId);
                 GC.Collect();
