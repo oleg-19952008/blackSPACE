@@ -51,10 +51,29 @@ namespace Do
         private static ConsoleEventDelegate _handler;
         private delegate bool ConsoleEventDelegate(int eventType);
         public static string VERSION = "v0.1.6.2 \n JPA v0.3.1   ";
-        //public static void Main(string[] a)
-        //{
-        //        new Thread(Do.Core.AsynchronousSocketListener.StartListening).Start();
-        //    }
+
+        // Точка входа консольного приложения
+        public static void Main(string[] a)
+        {
+            // Запуск сервера: загрузка настроек/БД + слушатель сокетов (как в server.starter.ui)
+            new Thread(Do.Core.AsynchronousSocketListener.StartListening).Start();
+            // Не даём процессу завершиться, ждём нажатия Enter для корректной остановки
+            Console.ReadLine();
+            try
+            {
+                if (Users != null)
+                {
+                    foreach (var user in Users)
+                    {
+                        user.Value.discconectUser(-1);
+                    }
+                }
+            }
+            catch
+            {
+            }
+        }
+
         public void RUN()
         {
 
@@ -70,6 +89,8 @@ namespace Do
             Out.WriteLine("Devoloped by Cryz35");
             Out.WriteLine("NavigatoR & SeVeN edition");
             Out.WriteLine("¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦");
+            // Сокет-слушатель запускается из Main (AsynchronousSocketListener.StartListening),
+            // здесь только инициализация ядра сервера.
             new Program().Server();
             new Program().CountUser();
             //    Console.ReadLine();
@@ -759,22 +780,17 @@ namespace Do
         {
 
             out___ = format + header;
-            ////Console.ForegroundColor = ConsoleColor.White;
-            ////Console.Write(" " + DateTime.Now + " -");
-            //if (header != "")
-            //{
-            //    //Console.Write("[");
-            //    //Console.ForegroundColor = ConsoleColor.DarkGray;
-            //    //Console.Write(header);
-            //    //Console.ForegroundColor = ConsoleColor.White;
-            //    //Console.Write("] ");
-
-            //}
-
-            //Console.Write(" - ");
-            //Console.ForegroundColor = color;
-            //Console.WriteLine(format);
-            //Console.ForegroundColor = ConsoleColor.White;
+            // Консольный вывод сообщений сервера
+            Console.ForegroundColor = ConsoleColor.White;
+            Console.Write(" " + DateTime.Now + " - ");
+            if (header != "")
+            {
+                Console.ForegroundColor = ConsoleColor.DarkGray;
+                Console.Write("[" + header + "] ");
+            }
+            Console.ForegroundColor = color;
+            Console.WriteLine(format);
+            Console.ResetColor();
         }
     }
 }
