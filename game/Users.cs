@@ -124,6 +124,9 @@ namespace Do.game
             {
                 while (!_socketClosed && !DestroyedClass && !_destroyed)
                 {
+                    // Фоновая сверка с БД каждые 30 сек: покупка в магазине/другой клиент
+                    // обновили строки в базе — подтянуть изменения ресурсов и вооружения.
+                    SyncWithDatabase();
                     Send("0|A|v|" + Ship.speed);
                     //if (Ship.rank == 21)
                     //{
@@ -277,6 +280,13 @@ namespace Do.game
                         // а HP корабля не успело бы сохраниться в БД ("корабль без хп").
                         _destroyed = false;
                         System.Threading.Interlocked.Exchange(ref _disconnectStarted, 0);
+                        // Сбрасываем снимок фонового БД-синхронизатора (см. SyncWithDatabase):
+                        // при повторном входе LoadConfigs() загрузит актуальные значения из
+                        // базы, а старый снимок прошлого сеанса вызвал бы ложные "изменения".
+                        _dbAmmoSnapshot = null;
+                        _dbUri = int.MinValue;
+                        _dbCredits = int.MinValue;
+                        _lastDbSyncCheck = DateTime.MinValue;
 
                         var userRow = Program.CheckSession(UserId, sessionId);
                         if (userRow == null)
@@ -5127,6 +5137,124 @@ namespace Do.game
             { }
         }
         public static int changed_ = 0;
+
+        #region Background DB sync (каждые 30 сек)
+        // Фоновая проверка: изменились ли ресурсы/вооружение в БД (например, покупка
+        // в магазине или сбор через другой клиент), и доводка состояния клиента.
+        private DateTime _lastDbSyncCheck = DateTime.MinValue;
+        private Dictionary<string, int> _dbAmmoSnapshot = null;   // lootid -> Q
+        private int _dbUri = int.MinValue, _dbCredits = int.MinValue;
+        private const int DbSyncIntervalMs = 30000;
+
+        private void SyncWithDatabase()
+        {
+            // Вызывается из UpdateShip_ (фоновый поток игрока). Не чаще раза в 30 секунд.
+            var now = DateTime.Now;
+            if ((now - _lastDbSyncCheck).TotalMilliseconds < DbSyncIntervalMs) return;
+            _lastDbSyncCheck = now;
+
+            try
+            {
+                using (var dbClient = Program.Manager.getQueryreactor())
+                {
+                    // ---- 1. Боеприпасы/вооружение (ammunition_%) ----
+                    var res = (DataTable)dbClient.query("SELECT lootid,Q FROM server_1_player_all_items WHERE server_1_player_all_items.playerID=" + UserId + " AND server_1_player_all_items.lootid LIKE 'ammunition_%'");
+                    var fresh = new Dictionary<string, int>();
+                    foreach (DataRow row in res.Rows)
+                    {
+                        int qv;
+                        if (int.TryParse(row["Q"].ToString(), out qv))
+                            fresh[row["lootid"].ToString()] = qv;
+                    }
+
+                    bool changed = false;
+                    if (_dbAmmoSnapshot == null)
+                    {
+                        // Первый пропуск после логина: LoadConfigs()/вход уже загрузили
+                        // актуальные значения — просто запоминаем снимок, ничего не трогаем.
+                        _dbAmmoSnapshot = fresh;
+                    }
+                    else
+                    {
+                        foreach (var kv in fresh)
+                        {
+                            int oldq;
+                            if (_dbAmmoSnapshot.TryGetValue(kv.Key, out oldq) && oldq == kv.Value) continue;
+                            changed = true;
+                            ApplyAmmoFromDb(kv.Key, kv.Value);
+                        }
+                        foreach (var key in _dbAmmoSnapshot.Keys)
+                        {
+                            if (!fresh.ContainsKey(key)) { changed = true; break; }
+                        }
+                        _dbAmmoSnapshot = fresh;
+                    }
+
+                    if (changed)
+                    {
+                        // Пересчёт зависимых значений (ISHA/SMBA из ACM-01) — как в LoadConfigs().
+                        if (Ship.ACM01 != 0)
+                        {
+                            double Ammo = Ship.ACM01 / 10;
+                            Ship.ISHA = (int)Math.Truncate(Ammo);
+                            Ship.SMBA = (int)Math.Truncate(Ammo);
+                        }
+                        // Синхронизация клиента пакетами того же формата, что при входе:
+                        Send("0|B|" + Ship.x1 + "|" + Ship.x2 + "|" + Ship.x3 + "|" + Ship.UCB100 + "|" + Ship.sab + "|" + Ship.rsb);
+                        SendSpAmmo();
+                        Send("0|RL|R|" + Ship.HSTRM01 + "|" + Ship.UBR100 + "|" + Ship.ECO10);
+                    }
+
+                    // ---- 2. Ресурсы (uri/credits) ----
+                    var pdata = (DataTable)dbClient.query("SELECT uri,credits FROM server_1_players WHERE playerID=" + UserId);
+                    if (pdata.Rows.Count == 1)
+                    {
+                        int dbUri = Convert.ToInt32(pdata.Rows[0]["uri"]);
+                        int dbCredits = Convert.ToInt32(pdata.Rows[0]["credits"]);
+                        if (dbUri != _dbUri || dbCredits != _dbCredits)
+                        {
+                            _dbUri = dbUri;
+                            _dbCredits = dbCredits;
+                            Ship.uri = dbUri;
+                            Ship.credits = dbCredits;
+                            // Полный профиль (тот же пакет, что при входе) — обновляет
+                            // счётчики ресурсов в UI клиента. HP/shield здесь берутся из
+                            // текущих серверных значений, поэтому перетирания нет.
+                            UpdateShip();
+                        }
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                // Фоновая синхронизация не должна ронать цикл UpdateShip_.
+                Out.WriteLine("SyncWithDatabase failed for user " + UserId + ": " + e.Message, "User.DbSync", ConsoleColor.DarkYellow);
+            }
+        }
+
+        private void ApplyAmmoFromDb(string lootid, int quantity)
+        {
+            switch (lootid)
+            {
+                case "ammunition_laser_lcb-10": Ship.x1 = quantity; break;
+                case "ammunition_laser_mcb-25": Ship.x2 = quantity; break;
+                case "ammunition_laser_mcb-50": Ship.x3 = quantity; break;
+                case "ammunition_laser_ucb-100": Ship.UCB100 = quantity; break;
+                case "ammunition_laser_rsb-75": Ship.rsb = quantity; break;
+                case "ammunition_laser_sab-50": Ship.sab = quantity; break;
+                case "ammunition_rocket_plt-2021": Ship.PLT2021 = quantity; break;
+                case "ammunition_rocket_plt-3030": Ship.PLT3030 = quantity; break;
+                case "ammunition_rocket_plt-2026": Ship.PLT2026 = quantity; break;
+                case "ammunition_rocket_r-310": Ship.R310 = quantity; break;
+                case "ammunition_specialammo_emp-01": Ship.EMPA = quantity; break;
+                case "ammunition_rocketlauncher_eco-10": Ship.ECO10 = quantity; break;
+                case "ammunition_rocketlauncher_ubr-100": Ship.UBR100 = quantity; break;
+                case "ammunition_rocketlauncher_hstrm-01": Ship.HSTRM01 = quantity; break;
+                case "ammunition_mine_acm-01": Ship.ACM01 = quantity; break;
+            }
+        }
+        #endregion
+
         public void LoadConfigs()
         {
             try
