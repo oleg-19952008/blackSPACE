@@ -123,7 +123,6 @@
     <None Include="App.config">
       <SubType>Designer</SubType>
     </None>
-    <Compile Include="core.encrypt.cs" />
   </ItemGroup>
   <ItemGroup />
   <ItemGroup>

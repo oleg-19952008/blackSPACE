@@ -84,16 +84,26 @@ partial class User
                         foreach (DataRow row in eq.Rows)
                             eqParts.Add("cfg" + cfgNum + "=" + row["lasers"] + "/" + row["generators"] + "/" + row["heavy_guns"] + "/" + row["extras"]);
                     }
-                    var dr = (DataTable)dbClient.query("SELECT drone_kind,drone_level FROM server_1_player_drones WHERE playerID=" + UserId + " ORDER BY id");
+                    // ВАЖНО: в этих таблицах нет колонок "id"/"configNum" (в отличие от
+                    // server_1_hangar_config_ship), поэтому ORDER BY по ним падал с ошибкой
+                    // MySqlException 1054 "Unknown column ... in 'order clause'" и весь снимок
+                    // снаряжения в DbSync не строился. Сортировку делаем стабильно на стороне C#.
+                    var dr = (DataTable)dbClient.query("SELECT drone_kind,drone_level FROM server_1_player_drones WHERE playerID=" + UserId);
+                    var droneRows = new List<string>();
                     foreach (DataRow row in dr.Rows)
-                        eqParts.Add("d=" + row["drone_kind"] + ":" + row["drone_level"]);
-                    var cd = (DataTable)dbClient.query("SELECT * FROM server_1_hangar_config_drones WHERE playerID=" + UserId + " ORDER BY configNum");
+                        droneRows.Add("d=" + row["drone_kind"] + ":" + row["drone_level"]);
+                    droneRows.Sort(StringComparer.Ordinal);
+                    eqParts.AddRange(droneRows);
+                    var cd = (DataTable)dbClient.query("SELECT * FROM server_1_hangar_config_drones WHERE playerID=" + UserId);
+                    var cfgDroneRows = new List<string>();
                     foreach (DataRow row in cd.Rows)
                     {
                         var rp = new List<string>();
                         foreach (DataColumn c in cd.Columns) rp.Add(Convert.ToString(row[c]));
-                        eqParts.Add("cd=" + string.Join(":", rp.ToArray()));
+                        cfgDroneRows.Add("cd=" + string.Join(":", rp.ToArray()));
                     }
+                    cfgDroneRows.Sort(StringComparer.Ordinal);
+                    eqParts.AddRange(cfgDroneRows);
                     var nt = (DataTable)dbClient.query("SELECT slot_one,slot_two,slot_three FROM server_1_player_nanotech WHERE playerId=" + UserId);
                     foreach (DataRow row in nt.Rows)
                         eqParts.Add("nt=" + row["slot_one"] + "/" + row["slot_two"] + "/" + row["slot_three"]);

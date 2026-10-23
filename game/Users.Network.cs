@@ -119,12 +119,16 @@ partial class User
                                 user.Value.PlayersInRange.Remove(UserId);
                             }
 
-                            var x = Program.Users[UserId].Ship.GetPosX();
-                            var y = Program.Users[UserId].Ship.GetPosY();
+                            var x = Convert.ToInt32(userRow["x"]);
+                            var y = Convert.ToInt32(userRow["y"]);
                             var hp = Program.Users[UserId].Ship.HP;
                             var shd = Program.Users[UserId].Ship.shield;
                             CurrentConfig = Program.Users[UserId].CurrentConfig;
-                            MapId = Program.Users[UserId].MapId;
+                            // Восстанавливаем карту из БД (последнее место, где был игрок),
+                            // а не с новой пустой MapId=1 этого объекта — иначе при re-login
+                            // игрока выбрасывало на первую карту.
+                            MapId = Convert.ToUInt16(userRow["mapId"]);
+                            if (!Program.Maps.ContainsKey(MapId)) MapId = Program.Users[UserId].MapId;
                             Program.Users[UserId].discconectUser();
                             Program.Users.Add(UserId, this);
                             Do.game.usersClass.Ship.User_ID = (int)UserId;
@@ -332,6 +336,15 @@ partial class User
                         else if (packetHeader.StartsWith("PET"))
                         {
                             var packetsub = packetParser.GetString();
+                            // Клиент присылает "0|PET|U|..." когда модуль дрона на его
+                            // стороне инициализирован. Запоминаем это: серверный пакет
+                            // "0|PET|I" имеет смысл слать только после такого сигнала
+                            // (см. Pet.Activate) — иначе первое включение дрона
+                            // "зависает" и механизмы выбираются только со второго раза.
+                            if (packetsub == "U")
+                            {
+                                ClientPetInitialized = true;
+                            }
                             switch (packetsub)
                             {
                                 case "L":
@@ -830,18 +843,52 @@ partial class User
                             }
                             else if (packetHeader == "map")
                             {
-                                //   Program.Maps[MapId].AddUser(UserId);
-
+                                // Админский прыжок на любую карту: пакет вида "map|<id>".
                                 var map_id = packetParser.GetUInt();
-                                //     Do.serverGame.Map.SendPortals2(UserId);
-                                //  Users[UserId].sendStations();
-                                MapId = (ushort)map_id;
-                                Do.serverGame.Map.add_user(UserId);
-                                foreach (var player in Program.Maps[MapId].Users)
+
+                                if (!Program.Maps.ContainsKey((ushort)map_id))
                                 {
-                                    player.Value.Send("RDY|I|" + UserId + "|" + Ship.Name + "|" + Ship.Id + "|" + Ship.speed + "|" + Ship.shield2 + "|" + Ship.shield + "|" + Ship.HP + "|" + Ship.maxHP + "|5|100|" + Ship.x + "|" + Ship.y + "|" + MapId + "|" + Ship.GetFactionID() + "|" + Ship.clanID + "|1500|0|15|" + Ship.premium + "|" + Ship.exp + "|" + Ship.honor + "|" + Ship.level + "|" + Ship.credits + "|" + Ship.uri + "|10|" + Ship.rank + "|" + Ship.tagName + "|0|1|" + Ship.cloaked + "|50|25");
+                                    Send("0|A|STD|Карта " + map_id + " не найдена. Доступные: " +
+                                         string.Join(", ", Program.Maps.Keys));
+                                    return;
                                 }
-                                SendUserShit();
+
+                                var oldMapId = (uint)MapId;
+                                if (oldMapId == map_id)
+                                {
+                                    Send("0|A|STD|Ты уже на карте " + map_id);
+                                    return;
+                                }
+
+                                try
+                                {
+                                    // Сбрасываем выделение/атаку и убираем юзера со старой карты.
+                                    Ship.selectedUserId = 0;
+                                    Ship.isAttacking = false;
+                                    Ship.selected1 = false;
+                                    PlayersInRange = new List<uint>();
+                                    PlayersInRange.Add(UserId);
+
+                                    if (Program.Maps.ContainsKey((ushort)oldMapId))
+                                        Program.Maps[(ushort)oldMapId].RemoveUser(UserId);
+
+                                    // Меняем карту и добавляем юзера на новую.
+                                    MapId = (ushort)map_id;
+                                    Program.Maps[(ushort)map_id].AddUser(UserId);
+
+                                    Send("0|A|STD|Прыгнул на карту " + map_id);
+                                    Out.WriteLine("[Admin] User " + UserId + " (" + Ship.Name +
+                                                  ") jumped map " + oldMapId + " -> " + map_id,
+                                                  "Admin.Map", ConsoleColor.Cyan);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Send("0|A|STD|Ошибка прыжка: " + ex.Message);
+                                    Out.WriteLine("[Admin] map jump FAILED user " + UserId +
+                                                  " " + oldMapId + " -> " + map_id + ": " +
+                                                  ex.Message + "\n" + ex.StackTrace,
+                                                  "Admin.Map", ConsoleColor.Red);
+                                }
 
                             }
                             else if (packetHeader == "blu")

@@ -75,3 +75,14 @@ C:\Users\NEGA\Documents\GitHub\blackSPACE\Dark SPACE(Black SPACE server)\Dark SP
 C:\Users\NEGA\Documents\GitHub\blackSPACE\Dark SPACE(Black SPACE server)\Dark SPACE(Black SPACE server)\obj\Debug\Dark SPA.311C3EAC.Up2Date
 C:\Users\NEGA\Documents\GitHub\blackSPACE\Dark SPACE(Black SPACE server)\Dark SPACE(Black SPACE server)\obj\Debug\Server.exe
 C:\Users\NEGA\Documents\GitHub\blackSPACE\Dark SPACE(Black SPACE server)\Dark SPACE(Black SPACE server)\obj\Debug\Server.pdb
+C:\inetpub\opera35usb_ru\_\obj\Debug\Dark SPACE(Black SPACE server).core.csproj.AssemblyReference.cache
+C:\inetpub\opera35usb_ru\_\obj\Debug\Server.exe.config
+C:\inetpub\opera35usb_ru\_\obj\Debug\Do.Properties.Resources.resources
+C:\inetpub\opera35usb_ru\_\obj\Debug\Dark SPACE(Black SPACE server).core.csproj.GenerateResource.cache
+C:\inetpub\opera35usb_ru\_\obj\Debug\Dark SPACE(Black SPACE server).core.csproj.CoreCompileInputs.cache
+C:\inetpub\opera35usb_ru\_\obj\Debug\Server.exe
+C:\inetpub\opera35usb_ru\_\obj\Debug\Server.pdb
+C:\inetpub\opera35usb_ru\_\bin\Debug\Server.exe.config
+C:\inetpub\opera35usb_ru\_\bin\Debug\Server.exe
+C:\inetpub\opera35usb_ru\_\bin\Debug\Server.pdb
+C:\inetpub\opera35usb_ru\_\obj\Debug\Dark SPA.311C3EAC.Up2Date

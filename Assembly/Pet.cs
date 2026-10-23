@@ -38,50 +38,59 @@ namespace Do.Assembly
         {
             try
             {
-                // exp_ (статическое поле Users.PvE.cs) заполняется только при получении урона,
-                // поэтому на "первом включении" после входа в игру он мог быть 0 (или опытом
-                // другого игрока) -> PET|S отправлялся с кривым опытом и клиент не давал
-                // выбрать режимы. Берём реальный опыт корабля владельца напрямую.
-                var exp = Program.Users[UserId].Ship.exp / 900;
+                var owner = Program.Users[UserId];
+                var exp = owner.Ship.exp / 900;
+
+                // Ключевой фикс бага "дрон работает только со второго включения":
+                // раньше здесь безусловно отправлялось "0|PET|I|1|1|1". На ПЕРВОМ
+                // включении после входа в игру клиент ещё не имеет инициализированного
+                // модуля дрона и пакет "I" переводит его в полу-состояние: кнопки
+                // выбора механизмов остаются заблокированными. Со второго включения
+                // (после DeActivate -> "0|PET|D", сбросившего состояние клиента) всё
+                // отрабатывало. Поэтому "I" шлём только если клиент реально сообщил
+                // об инициализации модуля (флаг ClientPetInitialized ставится из
+                // пакета "0|PET|U|..." в Users.Network.cs), а корректная первичная
+                // инициализация выполняется пакетом "0|n|d|<uid>|<droneKind>" в
+                // Users.Ammo.cs (sendConfig) при входе в игру.
+                if (owner.ClientPetInitialized && !owner._petInitSent)
+                {
+                    owner.Send("0|PET|I|1|1|1");
+                    owner._petInitSent = true;
+                }
+                owner.Send("0|PET|S|1|15|" + exp + "|" + (exp + 10000) + "|999|999|999|999|1|15|1|[PET 15] " + owner.Ship.Name);
+
+                // Полный набор доступных режимов: раньше отправлялись только
+                // passive/guard/kami, из-за чего часть кнопок выбора механизмов
+                // была неактивна до перезапуска пета.
+                owner.Send("0|PET|G|A|101"); // passive
+                owner.Send("0|PET|G|SEL|101");
+                owner.Send("0|PET|G|A|102"); // guard
+                owner.Send("0|PET|G|A|1");   // autoloot
+                owner.Send("0|PET|G|A|2");   // rescollect
+                owner.Send("0|PET|G|A|6");   // repair
+                owner.Send("0|PET|G|A|7");   // kami
+                owner.Send("0|PET|G|D|102"); // по умолчанию активен только passive
+                owner.Send("0|PET|G|D|1");
+                owner.Send("0|PET|G|D|2");
+                owner.Send("0|PET|G|D|6");
+                owner.Send("0|PET|G|D|7");
 
                 PetActive = true;
                 Destroyed = false;
-                Speed = Program.Users[UserId].Ship.speed;
-                X = Program.Users[UserId].Ship.GetPosX();
-                Y = Program.Users[UserId].Ship.GetPosY();
-                // Инициализация статуса дрона (0|PET|I) должна приходить ДО списка и режимов,
-                // иначе клиент считает дрон неинициализированным и блокирует выбор режимов,
-                // пока модуль не "прогонят" через выкл/вкл.
-                Program.Users[UserId].Send("0|PET|I|1|1|1");
-                Program.Users[UserId].Send("0|PET|S|1|15|"+ exp +"|"+(exp+10000)+"|999|999|999|999|1|15|1|[PET 15] " + Program.Users[UserId].Ship.Name);
+                Speed = owner.Ship.speed;
+                X = owner.Ship.GetPosX();
+                Y = owner.Ship.GetPosY();
 
-                // Полный набор доступных режимов. Раньше отправлялись только passive/guard/kami,
-                // из-за чего часть кнопок выбора механизмов была неактивна до перезапуска пета.
-                Program.Users[UserId].Send("0|PET|G|A|101"); // passive
-                Program.Users[UserId].Send("0|PET|G|SEL|101");
-                Program.Users[UserId].Send("0|PET|G|A|102"); // guard
-                Program.Users[UserId].Send("0|PET|G|A|1");   // autoloot
-                Program.Users[UserId].Send("0|PET|G|A|2");   // rescollect
-                Program.Users[UserId].Send("0|PET|G|A|6");   // repair
-                Program.Users[UserId].Send("0|PET|G|A|7");   // kami
-                Program.Users[UserId].Send("0|PET|G|D|102"); // по умолчанию активен только passive
-                Program.Users[UserId].Send("0|PET|G|D|1");
-                Program.Users[UserId].Send("0|PET|G|D|2");
-                Program.Users[UserId].Send("0|PET|G|D|6");
-                Program.Users[UserId].Send("0|PET|G|D|7");
-                for (var index = 0; index < Program.Maps[Program.Users[UserId].MapId].Users.Count; index++)
+                for (var index = 0; index < Program.Maps[owner.MapId].Users.Count; index++)
                 {
-                    var s = Program.Users[UserId];
-
-                    Program.Maps[Program.Users[UserId].MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (s.UserId + 1000) + "|15|[PET 15] " + Program.Users[UserId].Ship.Name + " |" + Program.Users[UserId].Ship.factionId + "|1|1|" + Program.Users[UserId].Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
-                 //   Program.Maps[Program.Users[UserId].MapId].Users.ElementAt(index).Value.Send("0|n|d|" + (s.UserId + 1000) + "|" + Program.Users[UserId].Ship.DronePacket);
+                    Program.Maps[owner.MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (owner.UserId + 1000) + "|15|[PET 15] " + owner.Ship.Name + " |" + owner.Ship.factionId + "|1|1|" + owner.Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
                 }
                 Movement();
                 AttackLoop();
             }
             catch (Exception e)
             {
-           //     Out.WriteLine(e.StackTrace);
+                Out.WriteLine("Pet.Activate failed for user " + UserId + ": " + e.Message + "\n" + e.StackTrace, "Pet", ConsoleColor.Red);
             }
         }
         public void DeActivate()
