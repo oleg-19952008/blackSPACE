@@ -51,9 +51,6 @@ partial class User
 
         public bool GodMode = false;
         public int LastPing = 0;
-        // Состояние модуля дрона на стороне клиента (см. Pet.Activate / пакет "0|PET|U").
-        public bool ClientPetInitialized = false;
-        public bool _petInitSent = false;
         public int Blk = 0;
         public int GodModeDelay = 300;
         private bool _repairRequest;

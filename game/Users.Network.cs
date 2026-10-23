@@ -336,15 +336,6 @@ partial class User
                         else if (packetHeader.StartsWith("PET"))
                         {
                             var packetsub = packetParser.GetString();
-                            // Клиент присылает "0|PET|U|..." когда модуль дрона на его
-                            // стороне инициализирован. Запоминаем это: серверный пакет
-                            // "0|PET|I" имеет смысл слать только после такого сигнала
-                            // (см. Pet.Activate) — иначе первое включение дрона
-                            // "зависает" и механизмы выбираются только со второго раза.
-                            if (packetsub == "U")
-                            {
-                                ClientPetInitialized = true;
-                            }
                             switch (packetsub)
                             {
                                 case "L":
