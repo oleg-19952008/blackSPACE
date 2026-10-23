@@ -515,6 +515,12 @@ partial class User
                 Ship.y = st[2];
                 Program.Maps[MapId].AddUser(UserId);
                 sendStations();
+                // Подтверждение перехода для клиента + актуальные счётчики
+                // станций (spaceball), чтобы кнопка не «зависала» после прыжка.
+                Send("0|m|" + MapId + "|" + Ship.x + "|" + Ship.y);
+                Send("0|n|ssc|1|0");
+                Send("0|n|ssc|2|0");
+                Send("0|n|ssc|3|0");
                 return true;
             }
             catch (Exception e)

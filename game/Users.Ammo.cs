@@ -40,10 +40,17 @@ partial class User
             Send("0|3|" + Ship.R310 + "|" + Ship.PLT2026 + "|" + Ship.PLT2021 + "|" + Ship.PLT3030 + "|" + Ship.PLD8 + "|" + Ship.DCR250 + "|" + Ship.WIZ + "|" + Ship.ACM01 + "|" + Ship.SMBA + "|" + Ship.ISHA + "|" + Ship.EMPA + "|" + Ship.EMPM01 + "|" + Ship.SABM01 + "|" + Ship.DDM01);
             //this.Send("0|A|CPU|C|" + this.Ship.cloaks);
             Send("0|RDY|POI");
-            // this.Send("0|n|ssi");
-            //this.Send("0|n|ssc|1|" + Spaceball.MMO);
-            //this.Send("0|n|ssc|2|" + Spaceball.EIC);
-            // this.Send("0|n|ssc|3|" + Spaceball.VRU);
+            // SPACEBALL: рассылка контрольных счётчиков станций фракций.
+            // Клиент по этим значениям показывает/разблокирует кнопку перехода на
+            // боевую станцию своей фракции (spaceball). Класс Spaceball с полями
+            // MMO/EIC/VRU в этом коде сервера отсутствует, поэтому отправляем
+            // нулевые счётчики напрямую — этого достаточно, чтобы клиент отрисовал
+            // элементы spaceball и начал слать "n|s|<faction>", который сервер
+            // обрабатывает через SetSpaceball().
+            Send("0|n|ssi");
+            Send("0|n|ssc|1|0");
+            Send("0|n|ssc|2|0");
+            Send("0|n|ssc|3|0");
             // this.Send("0|m|" + this.mapId + "|" + this.Ship.x + "|" + this.Ship.y);
             Send("0|A|BS|0/0/" + Ship.dmgbooster + "/" + Ship.shieldbooster + "/0/0/0/" + Ship.hpbooster);
             Send("0|n|d|" + UserId + "|" + Ship.DronePacket);
