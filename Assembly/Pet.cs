@@ -42,16 +42,24 @@ namespace Do.Assembly
         {
             try
             {
+                // Повторное включение без выключения игнорируем: иначе каждый
+                // "PET|L" заново шлёт весь набор G|A/G|D/G|SEL и перезапускает
+                // циклы Movement/AttackLoop — клиент заливаются пакетами.
+                if (PetActive)
+                {
+                    return;
+                }
                 var owner = Program.Users[UserId];
                 var exp = owner.Ship.exp / 900;
 
-                // ВАЖНО: даже если "0|PET|I|1|1|1" уже уходил при логине
-                // (SendUserShit), перед открытием окна пета его нужно отправить
-                // ЕЩЁ РАЗ. Первый (логинный) пакет клиент обрабатывает в момент,
-                // когда UI-модуль дрона ещё не готов, и окно остаётся
-                // "неинициализированным" — механизмы не выбираются с первого
-                // раза. Повторная отправка прямо перед пакетами окна приводит
-                // UI в рабочее состояние сразу.
+                PetActive = true;
+                Destroyed = false;
+
+                // Инициализация модуля дрона на клиенте. Отправляем её ДО
+                // открытия окна и до синхронизации механизмов — именно этот
+                // пакет делает кнопки механизмов кликабельными с первого раза
+                // (раньше он мог не доходить до UI-модуля, и выбор работал
+                // только после достать/убрать/достать).
                 owner.Send("0|PET|I|1|1|1");
                 owner.Send("0|PET|S|1|15|" + exp + "|" + (exp + 10000) + "|999|999|999|999|1|15|1|[PET 15] " + owner.Ship.Name);
 
@@ -59,8 +67,6 @@ namespace Do.Assembly
                 // что реально активен (по умолчанию — пассивный 101).
                 SendGearSync();
 
-                PetActive = true;
-                Destroyed = false;
                 Speed = owner.Ship.speed;
                 X = owner.Ship.GetPosX();
                 Y = owner.Ship.GetPosY();
@@ -82,9 +88,12 @@ namespace Do.Assembly
         /// подсвечен только реально выбранный (SelectedGear, по умолчанию 101 —
         /// пассивный). Отправляется при Activate и после смены карты.
         /// Порядок важен: сначала A для всех, затем D для невыбранных, затем SEL.
+        /// Вызывается только когда пет РЕАЛЬНО активен (PetActive == true),
+        /// чтобы не проигрывать "звук запуска" на карте, где пета нет.
         /// </summary>
         public void SendGearSync()
         {
+            if (!PetActive) return;
             var owner = Program.Users[UserId];
             owner.Send("0|PET|G|A|101"); // passive
             owner.Send("0|PET|G|A|102"); // guard
@@ -101,41 +110,32 @@ namespace Do.Assembly
         }
 
         /// <summary>
-        /// Восстановление пета на новой карте после перехода (портал/прыжок):
-        /// если пет был включён до перехода, он должен остаться видимым и с тем
-        /// же выбранным механизмом; если выключен — клиентское окно обязано
-        /// показать выключенное состояние (иначе баг "окно показывает включён,
-        /// а по факту пета нет").
+        /// Восстановление пета на новой карте после перехода (портал/прыжок).
+        /// ВАЖНО: состояние окна пета хранится на клиенте и НЕ сбрасывается при
+        /// смене карты. Если сервер при входе на карту начнёт слать "0|PET|D"
+        /// (для выключенного пета) или "G|A/G|SEL" (для включённого), клиент
+        /// проигрывает звук остановки/запуска пета просто от входа на карту.
+        /// Поэтому здесь вообще ничего не отправляется, когда пет выключен, а
+        /// при включённом пете пересылаются только визуальные пакеты самого
+        /// дрона (PET|L / f|C), без оконных пакетов.
         /// </summary>
         public void RestoreAfterMapChange()
         {
             try
             {
-                if (!Program.Users.ContainsKey(UserId)) return;
-                // Старые циклы движения/атаки текущего пета останавливаем:
-                // PetActive == false заставит их выйти на следующей итерации.
-                var wasActive = PetActive;
-                PetActive = false;
-                if (wasActive)
+                if (!PetActive) return;
+                var owner = Program.Users[UserId];
+                if (owner == null) return;
+                X = owner.Ship.GetPosX();
+                Y = owner.Ship.GetPosY();
+                // Механизм уже выбран в клиентском окне и не сбрасывается при
+                // переходе — повторная синхронизация не нужна.
+                for (var index = 0; index < Program.Maps[owner.MapId].Users.Count; index++)
                 {
-                    var owner = Program.Users[UserId];
-                    PetActive = true;
-                    X = owner.Ship.GetPosX();
-                    Y = owner.Ship.GetPosY();
-                    owner.Send("0|PET|I|1|1|1");
-                    SendGearSync();
-                    for (var index = 0; index < Program.Maps[owner.MapId].Users.Count; index++)
-                    {
-                        Program.Maps[owner.MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (owner.UserId + 1000) + "|15|[PET 15] " + owner.Ship.Name + " |" + owner.Ship.factionId + "|1|1|" + owner.Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
-                    }
-                    Movement();
-                    AttackLoop();
+                    Program.Maps[owner.MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (owner.UserId + 1000) + "|15|[PET 15] " + owner.Ship.Name + " |" + owner.Ship.factionId + "|1|1|" + owner.Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
                 }
-                else
-                {
-                    // Пет выключен — гасим "фантомное" включённое состояние окна.
-                    Program.Users[UserId].Send("0|PET|D");
-                }
+                Movement();
+                AttackLoop();
             }
             catch (Exception e)
             {
@@ -147,6 +147,12 @@ namespace Do.Assembly
         {
             try
             {
+                // Игнорируем "PET|D", когда пет и так убран: иначе клиент
+                // повторно проигрывает звук остановки.
+                if (!PetActive)
+                {
+                    return;
+                }
                 var s = Program.Users[UserId];
                 PetActive = false;
                 Kami = false;
@@ -199,6 +205,14 @@ namespace Do.Assembly
                 Kami = false;
                 var packet = content.Split('|');
                 var gear = Convert.ToInt32(packet[3]);
+                // Повторный клик по уже выбранному механизму игнорируем: иначе
+                // на каждое "PET|G|L|<текущий>" сервер пересылает весь набор
+                // G|A/G|D/G|SEL — клиент засыпается пакетами (в логах это
+                // выглядело как бесконечный спам при доставании пета).
+                if (gear == SelectedGear)
+                {
+                    return;
+                }
                 // Запоминаем выбранный механизм, чтобы после смены карты
                 // восстановить в UI ровно его.
                 SelectedGear = gear;
@@ -209,8 +223,8 @@ namespace Do.Assembly
                         Kamikaze();
                         break;
                     case 102:
-                        AttackLoop();
                         GuardMode = true;
+                        AttackLoop();
                         break;
                 }
             }
