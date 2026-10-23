@@ -28,7 +28,7 @@ namespace Do.serverGame
             map.SendPortals(user);
             // Spaceball: на карте 4-4 (id 16) показываем входящему игроку мяч,
             // ворота и счёт; заодно гарантируем, что цикл мяча запущен.
-            if (_id == SpaceballFieldMap) map.SendSpaceballTo(user);
+            if (map._id == SpaceballFieldMap) map.SendSpaceballTo(user);
 
             if (map.Users[user].Ship.teleported)
             {
