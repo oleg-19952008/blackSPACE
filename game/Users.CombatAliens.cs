@@ -30,7 +30,7 @@ partial class User
                 {
                     return;
                 }
-                if (selected < 1000 && !Program.Maps[MapId].Aliens.ContainsKey(selected))
+                if (selected < 1000 && (!Program.Maps.ContainsKey(MapId) || Program.Maps[MapId].Aliens == null || !Program.Maps[MapId].Aliens.ContainsKey(selected)))
                 {
                     Ship.isAttacking = false;
                     return;

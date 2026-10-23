@@ -400,35 +400,70 @@ namespace Do.Assembly
             }
         }
 
+        /// <summary>
+        /// Поиск ближайшего живого не-босса вокруг владельца (радиус GuardSearchRadius).
+        /// Нужен потому, что клиент присылает SEL только при КЛИКЕ по цели; когда
+        /// моб умирает, Ship.selectedUserId остаётся висеть на мёртвом id и пет
+        /// терял цель. В режиме защиты пет должен продолжать атаковать мобов,
+        /// которых атакует игрок, поэтому подбираем ближайшего живого автоматически.
+        /// </summary>
+        private const int GuardSearchRadius = 840;
+        private Alien FindNearestLiveAlien(game.User owner)
+        {
+            try
+            {
+                if (!Program.Maps.ContainsKey(owner.MapId)) return null;
+                var map = Program.Maps[owner.MapId];
+                if (map.Aliens == null) return null; // карта ещё не проинициализирована
+                Alien best = null;
+                int bestDist = int.MaxValue;
+                foreach (var pair in map.Aliens)
+                {
+                    var a = pair.Value;
+                    if (a == null || a.Destroyed) continue;
+                    // Боссы (Cubicon/Protegit и т.п.) — не автоцель для пета.
+                    if (a.TypeId >= 70 && a.TypeId <= 99) continue;
+                    var d = Distance.Get(a.X, owner.Ship.x, a.Y, owner.Ship.y);
+                    if (d > GuardSearchRadius) continue;
+                    if (d < bestDist) { bestDist = d; best = a; }
+                }
+                return best;
+            }
+            catch { return null; }
+        }
+
         private void Attack()
         {
             try
             {
                 var owner = Program.Users[UserId];
-                // КРИТИЧНО: цель читаем ДО любых проверок и НЕ сбрасываем флаги
-                // владельца. Серверный LaserLoop в момент выстрела игрока сам
-                // выключает Ship.isAttacking (Users.CombatLaser.cs / CombatAliens.cs),
-                // поэтому привязка к isAttacking делала «окно», когда пет стрелять
-                // не мог. В guard-режиме пет должен атаковать того же, кого атакует
-                // владелец — достаточно активной цели (Ship.selectedUserId), которую
-                // клиент ставит пакетом SEL ("LOG.INPUT:SEL|28").
-                if (!GuardMode)
+                if (!GuardMode || !Program.Maps.ContainsKey(owner.MapId))
                 {
                     return;
                 }
+                var map = Program.Maps[owner.MapId];
                 var targetId = owner.Ship.selectedUserId;
-                if (targetId == 0 || !Program.Maps.ContainsKey(owner.MapId))
-                {
-                    return;
-                }
 
-                // Цель < 1000 — NPC: раньше Attack() искала цель только среди
-                // игроков (Program.Users[targetId]), из-за чего пет в режиме
-                // защиты вообще не атаковал мобов. Теперь, как и корабль
-                // владельца, пета атакует любого, кого выбрано: и игроков, и NPC.
+                // Цель < 1000 — NPC. Раньше цель бралась ТОЛЬКО из
+                // Ship.selectedUserId, который сервер обновляет лишь при пакете
+                // "SEL". Клиент шлёт SEL один раз при клике; после смерти моба
+                // selectedUserId остаётся на мёртвом id — пет молчал. Теперь:
+                // если выбранная цель мертва/отсутствует, пет сам находит
+                // ближайшего живого моба вокруг владельца (режим защиты).
                 if (targetId < 1000)
                 {
-                    PetAttackAlien(owner, targetId);
+                    Alien alien = null;
+                    if (map.Aliens != null && map.Aliens.ContainsKey(targetId) && !map.Aliens[targetId].Destroyed)
+                        alien = map.Aliens[targetId];
+                    else
+                        alien = FindNearestLiveAlien(owner);
+                    if (alien != null)
+                    {
+                        // Синхронизируем цель владельца с реальным объектом атаки
+                        // пета, чтобы оба стреляли в одного моба.
+                        if (alien.Id != targetId) owner.Ship.selectedUserId = alien.Id;
+                        PetAttackAlien(owner, alien.Id);
+                    }
                     return;
                 }
 
