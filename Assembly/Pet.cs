@@ -240,16 +240,36 @@ namespace Do.Assembly
                 {
                     return;
                 }
-                GuardMode = false;
-                Kami = false;
                 var packet = content.Split('|');
                 var gear = Convert.ToInt32(packet[3]);
-                // Повторный клик по уже выбранному механизму игнорируем: иначе
-                // на каждое "PET|G|L|<текущий>" сервер пересылает весь набор
-                // G|A/G|D/G|SEL — клиент засыпается пакетами (в логах это
-                // выглядело как бесконечный спам при доставании пета).
+                // БЫЛО: любой клик сначала сбрасывал GuardMode/Kami, а повторный
+                // клик по уже выбранному механизму полностью игнорировался.
+                // Из-за этого, если клиент присылал "PET|G|L|102" на механизм,
+                // который сервер уже считал выбранным (например, после смены карты
+                // SelectedGear восстановился как 102), пет оставался с
+                // GuardMode == false и не атаковал вообще.
+                // СТАЛО: повторный клик по guard-механизму — это включение защиты
+                // (идемпотентно); клик по любому другому механизму снимает защиту.
+                if (gear == 102)
+                {
+                    SelectedGear = 102;
+                    Kami = false;
+                    GuardMode = true;
+                    SendGearSync();
+                    // AttackLoop() уже запущен из Activate()/RestoreAfterMapChange()
+                    // и сам проверяет GuardMode на каждой итерации — второй цикл
+                    // отсюда порождает параллельные потоки выстрелов (спам).
+                    return;
+                }
+                GuardMode = false;
+                Kami = false;
                 if (gear == SelectedGear)
                 {
+                    // Повторный клик по уже выбранному НЕ-guard механизму: режим
+                    // уже корректный, полный синк пересылаем только если UI мог
+                    // «отстать» — повторная рассылка безвредна и завершается,
+                    // т.к. клиент на ответных пакетов PET|G|L не генерирует.
+                    SendGearSync();
                     return;
                 }
                 // Запоминаем выбранный механизм, чтобы после смены карты
@@ -260,13 +280,6 @@ namespace Do.Assembly
                 {
                     case 7:
                         Kamikaze();
-                        break;
-                    case 102:
-                        GuardMode = true;
-                        // Цикл атаки уже запущен в Activate()/RestoreAfterMapChange()
-                        // и сам проверяет GuardMode на каждой итерации. Второй
-                        // AttackLoop() отсюда порождает параллельные циклы — при
-                        // повторном включении защиты пет начинал спамить выстрелами.
                         break;
                 }
             }
@@ -394,19 +407,14 @@ namespace Do.Assembly
             try
             {
                 var owner = Program.Users[UserId];
-                // Раньше здесь проверялся только флаг Ship.isAttacking. Этот флаг
-                // сервер выставляет в обработчике пакета "G" (отдаление цели на
-                // 1000+ px), а при обычном удержании ЛКМ по NPC клиент шлёт лишь
-                // "a|<цель>" + "1|x|y|...", и isAttacking для NPC мог оставаться
-                // false — пет никогда не стрелял по мобам. Теперь цель берётся из
-                // selectedUserId (его клиент шлёт пакетом SEL, см. лог:
-                // "LOG.INPUT:SEL|36"), а факт атаки определяется так же, как у
-                // корабля владельца: isAttacking ИЛИ выбранная цель с активным
-                // режимом защиты (в guard-режиме пет должен атаковать всё, что
-                // атакует игрок).
-                var attacking = owner.Ship.isAttacking ||
-                                (GuardMode && owner.Ship.selectedUserId != 0);
-                if (!attacking)
+                // КРИТИЧНО: цель читаем ДО любых проверок и НЕ сбрасываем флаги
+                // владельца. Серверный LaserLoop в момент выстрела игрока сам
+                // выключает Ship.isAttacking (Users.CombatLaser.cs / CombatAliens.cs),
+                // поэтому привязка к isAttacking делала «окно», когда пет стрелять
+                // не мог. В guard-режиме пет должен атаковать того же, кого атакует
+                // владелец — достаточно активной цели (Ship.selectedUserId), которую
+                // клиент ставит пакетом SEL ("LOG.INPUT:SEL|28").
+                if (!GuardMode)
                 {
                     return;
                 }
@@ -431,12 +439,24 @@ namespace Do.Assembly
                 {
                     return;
                 }
-                if (!owner.Ship.InRange)
-                {
-                    return;
-                }
+                // Проверка Ship.InRange убрана: этот флаг сервер выставляет только
+                // в обработчике пакета "G" (отлёт цели на 1000+ px, да и то для
+                // игроков). При обычном удержании ЛКМ по цели InRange может быть
+                // false — из-за этого пет молчал даже с активной целью. Вместо
+                // него — собственная проверка дистанции от позиции пета (см. ниже).
                 var userId = targetId;
                 var enemy = Program.Users[userId];
+                // Дистанция стреляет от позиции пета (как у PetAttackAlien), а не
+                // от корабля владельца: пет летает рядом, но его X/Y — свои.
+                var distToEnemy = Distance.Get(enemy.Ship.x, X, enemy.Ship.y, Y);
+                if (distToEnemy > 840)
+                {
+                    return; // пет ещё не долетел до цели
+                }
+                if (_petLaserCooldown.Contains(targetId)) return;
+                _petLaserCooldown.Add(targetId);
+                Task.Delay(1500).ContinueWith(_ => _petLaserCooldown.Remove(targetId));
+
                 // Урон пета по игроку = 10% урона корабля владельца.
                 var power = Convert.ToInt32(owner.Ship.damage * (owner.LaserId == 5 ? 2 : 1) * 0.1);
                 if (power < 1) power = 1;
