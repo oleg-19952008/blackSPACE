@@ -16,8 +16,8 @@ namespace Do.serverGame
     ///    пока по нему не начнут наносить урон.
     ///  - Направление полёта — К ВОРОТАМ корпорации атакующего (1=MMO, 2=EIC, 3=VRU):
     ///    игрок «бьёт» мяч в сторону своих ворот, чтобы пробить их (гол засчитывается
-    ///    владельцу пробитых ворот). Вектор пересчитывается на каждый удар, поэтому
-    ///    мяч летит именно в ворота, а не улетает в угол карты.
+    ///    владельцу пробитых ворот). Вектор задаётся при ударе (прямой полёт);
+    ///    удары «в бок» доворачиваются на створ — см. HitSpaceball/AimAtGoal.
     ///  - Баланс урона: 3000 — малый, 75000 — мощный. Мяч трогается при накопленном
     ///    уроне ~12000 (BallMoveThreshold) со скорости корабля (~450 px/s);
     ///    при 75000+ — максимум (~600 px/s), сопоставимо с быстро летящим
@@ -64,6 +64,11 @@ namespace Do.serverGame
                 { 2, new[] { FieldWidth - 300, FieldCenterY } },   // EIC  (правая сторона)
                 { 3, new[] { 300, FieldCenterY } },                // VRU  (левая сторона)
             };
+
+        // Стабильный порядок ворот для portalID в ssc (индекс 0..2 по ключу).
+        // Dictionary<int,...> перебирается в порядке вставки, но явно задаём
+        // массив, чтобы portalID не «поехал» при рефакторинге словаря.
+        private static readonly int[] SpaceballPortalOrder = { 1, 2, 3 };
 
         private Thread _spaceballThread;
         private volatile bool _spaceballRunning;
@@ -158,8 +163,8 @@ namespace Do.serverGame
         /// <summary>
         /// Пересчёт скорости/вектора из накопленного урона.
         /// Ниже порога — мяч стоит; выше — линейный рост до потолка.
-        /// Вектор ВСЕГДА пересчитывается заново: мяч летит точно в створ
-        /// ворот корпорации ударившего, а не по инерции в угол карты.
+        /// Вектор задаётся ОДИН раз при ударе (прямой полёт, как в футболе):
+        /// игрок направляет мяч позицией вокруг него и подправляет новым ударом.
         /// </summary>
         private void ApplyBallVelocity()
         {
@@ -176,11 +181,23 @@ namespace Do.serverGame
 
             int[] goal;
             if (!SpaceballGoals.TryGetValue(_ballHitter, out goal)) { _ballSpeed = 0; return; }
-            double dx = goal[0] - BallX, dy = goal[1] - BallY;
+            AimAtGoal(goal);
+        }
+
+        /// <summary>
+        /// Наводка вектора на ворота с дробовой (double) точностью.
+        /// ВАЖНО: раньше координаты ворот и мяча были целыми, вектор усреднял
+        /// направление через (int)-деление — при dy = 0 мяч «летел просто в бок»
+        /// вдоль стороны поля мимо створа. Здесь расписание остаётся дробным,
+        /// а округляем мы только саму скорость-вектор целиком.
+        /// </summary>
+        private void AimAtGoal(int[] goal)
+        {
+            double dx = goal[0] - (double)BallX, dy = goal[1] - (double)BallY;
             double len = Math.Sqrt(dx * dx + dy * dy);
-            if (len < 1) len = 1;
-            _ballVX = (int)(dx / len * _ballSpeed);
-            _ballVY = (int)(dy / len * _ballSpeed);
+            if (len < 1) { _ballVX = 0; _ballVY = 0; return; }
+            _ballVX = (int)Math.Round(dx / len * _ballSpeed);
+            _ballVY = (int)Math.Round(dy / len * _ballSpeed);
         }
 
         /// <summary>
@@ -199,34 +216,26 @@ namespace Do.serverGame
             return t;
         }
 
-        /// <summary>Шаг полёта мяча к воротам (вектор наводки обновляется каждый шаг).</summary>
+        /// <summary>Шаг полёта мяча к воротам.</summary>
         private void MoveBallStep()
         {
-            double dt = MovementTickMs / 1000.0;
-            // Напоминаем направление на ворота: после отскока/смены ударившего
-            // мяч должен лететь именно в створ, а не по касательной в угол.
-            if (_ballHitter != 0 && _ballSpeed > 0)
-            {
-                int[] goal;
-                if (SpaceballGoals.TryGetValue(_ballHitter, out goal))
-                {
-                    double gdx = goal[0] - BallX, gdy = goal[1] - BallY;
-                    double glen = Math.Sqrt(gdx * gdx + gdy * gdy);
-                    if (glen >= 1)
-                    {
-                        _ballVX = (int)(gdx / glen * _ballSpeed);
-                        _ballVY = (int)(gdy / glen * _ballSpeed);
-                    }
-                }
-            }
+            // ВНИМАНИЕ: здесь НЕ перенаводится вектор на ворота каждый тик!
+            // Раньше наводка шла с точностью до целого (int)-пикселя: когда мяч
+            // поравнялся с осью ворот (например dy = 0 при полёте к правым воротам
+            // EIC), вектор становился строго горизонтальным и мяч «летел просто
+            // в бок», проходя вдоль стороны поля мимо GoalRadius. Теперь вектор
+            // задаётся один раз при ударе (ApplyBallVelocity) — как настоящий
+            // удар в футболе: мяч летит по прямой, игрок может подправить
+            // направление новым ударом.
             _prevBallX = BallX; _prevBallY = BallY; // позиция до этого шага — для интерполяции клиента
-            BallX += (int)(_ballVX * dt);
-            BallY += (int)(_ballVY * dt);
+            double dt = MovementTickMs / 1000.0;
+            BallX += (int)Math.Round(_ballVX * dt);
+            BallY += (int)Math.Round(_ballVY * dt);
 
             CheckGoal();
 
             // Мяч вылетел за пределы поля — возврат в центр.
-            if (BallX < 0 || BallX > 41600 || BallY < 0 || BallY > 25600)
+            if (BallX < 0 || BallX > FieldWidth || BallY < 0 || BallY > FieldHeight)
             {
                 ResetBall();
             }
@@ -234,26 +243,41 @@ namespace Do.serverGame
 
         private void CheckGoal()
         {
-            int idx = 0;
-            foreach (var goal in SpaceballGoals)
+            // КОПИЯ словаря ворот: ниже под lock(this) вызывается ResetBall ->
+            // BroadcastMove, который может выкинуть отвалившегося игрока из
+            // Users; если бы в этот момент мы шли по SpaceballGoals, а другой
+            // поток менял словарь — коллекция была бы «изменена» и цикл упал
+            // бы с InvalidOperationException (гол не засчитан, табло молчит).
+            foreach (var goal in SpaceballGoals.ToList())
             {
+                int idx = Array.IndexOf(SpaceballPortalOrder, goal.Key); // стабильный portalID
                 if (Distance.Get(goal.Value[0], BallX, goal.Value[1], BallY) >= GoalRadius)
-                {
-                    idx++;
                     continue;
-                }
+
                 // Пробиты ворота компании goal.Key — очко ЕЙ.
                 int scorer = goal.Key;
                 SpaceballScore[scorer] = SpaceballScore.ContainsKey(scorer) ? SpaceballScore[scorer] + 1 : 1;
+                int newScore = SpaceballScore[scorer];
                 ResetBall(); // стоп-состояние + возврат в центр + рассылка позиции
-                // ssc|company|newScore|portalID — обновляет табло клиента
-                // (GuiManager.updateScoreboard) + анимацию портала.
-                SendEvent("ssc|" + scorer + "|" + SpaceballScore[scorer] + "|" + idx);
-                // Обновление самого табло счёта: клиент рисует цифры из
-                // INIT_SCOREBOARD (ssi), а SET_SCORE (ssc) лишь анимирует портал.
-                // Без повторного ssi счёт на табло после гола оставался нулевым.
-                SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] + "|0|0");
-                Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + SpaceballScore[scorer] + ").");
+
+                // Порядок пакетов важен (см. документацию MapEventsAssembly):
+                //  1) ssi|<mmo>|<eic>|<vru>|<speed>|<companyWithSpeed> — это НЕ
+                //     только инициализация: клиент перерисовывает цифры табло
+                //     именно из него (GuiManager.createSpaceballScoreboard /
+                //     updateScoreboard). Раньше мы слали «ssi|...|0|0» со
+                //     СБРОСОМ скорости — и клиент reset-ил индикаторы/табло,
+                //     из-за чего счёт визуально не обновлялся. Теперь speed =
+                //     текущая скорость мяча (после ResetBall это 0), company =
+                //     забившая корпорация — корректное полное состояние табло.
+                //  2) ssc|<company>|<newScore>|<portalID> — SET_SCORE:
+                //     анимация портала + обновление очков компании.
+                //  3) sss — индикаторы скорости (все в 0, мяч вернулся в центр).
+                SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
+                          "|" + _ballSpeed + "|" + scorer);
+                for (int c = 1; c <= 3; c++)
+                    SendEvent("sss|" + c + "|0");
+                SendEvent("ssc|" + scorer + "|" + newScore + "|" + idx);
+                Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + newScore + ").");
                 break;
             }
         }
@@ -267,6 +291,9 @@ namespace Do.serverGame
             _ballHitter = 0;
             _ballDamage = 0;
             _lastHitMs = 0;
+            // Индикаторы скорости — только sss (без повторного ssi: он может
+            // пересоздавать окно табло на клиенте). Цифры счёта обновляет
+            // вызывающий код (CheckGoal) своим ssi/ssc.
             for (int c = 1; c <= 3; c++)
                 SendEvent("sss|" + c + "|0");
             // Мяч вернулся в центр — показываем новую позицию всем зрителям.
@@ -290,13 +317,9 @@ namespace Do.serverGame
             // 2) SET_SPEED: индикатор скорости у держателя мяча.
             for (int c = 1; c <= 3; c++)
                 SendEventTo(u, "sss|" + c + "|" + (c == leader && _ballSpeed > 0 ? _ballSpeed : 0));
-            // 3) Текущие очки (табло).
-            int idx = 0;
-            foreach (var goal in SpaceballGoals)
-            {
-                SendEventTo(u, "ssc|" + goal.Key + "|" + SpaceballScore[goal.Key] + "|" + idx);
-                idx++;
-            }
+            // 3) Текущие очки (табло). portalID — стабильный индекс ворот.
+            foreach (var c in SpaceballPortalOrder)
+                SendEventTo(u, "ssc|" + c + "|" + SpaceballScore[c] + "|" + Array.IndexOf(SpaceballPortalOrder, c));
             // 4) Сам мяч.
             UpdateBallVisibility(userId);
             StartSpaceball();
@@ -304,8 +327,13 @@ namespace Do.serverGame
 
         /// <summary>
         /// «Удар» по мячу: вызывается из боевого кода при попадании по Spaceball.
-        /// Урон накапливается; направление — к воротам корпорации атакующего;
-        /// скорость полёта растёт с суммарным уроном (баланс: старт ~12k, пик ~75k).
+        /// Урон накапливается; скорость полёта растёт с суммарным уроном
+        /// (баланс: старт ~12k, пик ~75k). Направление — от позиции атакующего
+        /// через мяч (как удар в футболе): игрок наводится, подлетая с нужной
+        /// стороны, и может пробить точно в створ своих ворот. Если прямая от
+        /// игрока сквозь мяч не приводит к воротам ударившей корпорации (мяч
+        /// ушёл «в бок»), вектор доворачивается на ворота — гарантированный
+        /// полёт в створ, а не вдоль стороны поля.
         /// </summary>
         public void HitSpaceball(int attackerCompany, double damage, int fromX, int fromY)
         {
@@ -317,6 +345,30 @@ namespace Do.serverGame
                 _ballDamage += Math.Max(1, damage);
                 _lastHitMs = Environment.TickCount;
                 ApplyBallVelocity();
+
+                if (_ballSpeed > 0)
+                {
+                    // Вектор удара: продолжение линии «игрок -> мяч».
+                    double dx = BallX - (double)fromX, dy = BallY - (double)fromY;
+                    double len = Math.Sqrt(dx * dx + dy * dy);
+                    if (len >= 1)
+                    {
+                        _ballVX = (int)Math.Round(dx / len * _ballSpeed);
+                        _ballVY = (int)Math.Round(dy / len * _ballSpeed);
+                        // Проверка: приведёт ли этот удар к воротам? Считаем
+                        // расстояние от точки мяча до ближайшего створа вдоль
+                        // прямой полёта; если мимо — целимся прямо на ворота.
+                        int[] goal;
+                        if (SpaceballGoals.TryGetValue(attackerCompany, out goal))
+                        {
+                            double gx = goal[0] - (double)BallX, gy = goal[1] - (double)BallY;
+                            // Косинус угла между вектором удара и направлением на ворота.
+                            double glen = Math.Sqrt(gx * gx + gy * gy);
+                            double cos = glen < 1 ? 1 : (dx * gx + dy * gy) / (len * glen);
+                            if (cos < 0.85) AimAtGoal(goal); // удар «в сторону» — наводим на створ
+                        }
+                    }
+                }
 
                 // Индикатор скорости на scoreboard — у корпорации-ударившего.
                 for (int c = 1; c <= 3; c++)
@@ -335,15 +387,25 @@ namespace Do.serverGame
 
         /// <summary>
         /// Рассылка событийного пакета (ssi/sss/ssc) всем на поле.
-        /// ВАЖНО: клиент (Flash, DarkOrbit 4.1) матчит события вида ssi/sss/ssc
-        /// ТОЛЬКО в строках формата "<ownerFrame>|<cmd>|...". В оригинальном
-        /// сервере ownerFrame — это ИД игрока-владельца окна (например "11004|ssi|..."),
-        /// а не "0" — фрейм "0" клиент не ассоциирует ни с одним слушателем
-        /// MapEventsAssembly, поэтому табло молчало. Шлём "<uid>|<cmd>|..." каждому.
+        /// ВАЖНО 1 (префикс): клиент (Flash, DarkOrbit 4.1) матчит события вида
+        /// ssi/sss/ssc ТОЛЬКО в строках формата "<ownerFrame>|<cmd>|...". В
+        /// оригинальном сервере ownerFrame — ИД игрока-владельца окна
+        /// ("11004|ssi|..."), а не "0" — фрейм "0" клиент не ассоциирует ни с
+        /// одним слушателем MapEventsAssembly. Шлём "<uid>|<cmd>|..." каждому.
+        /// ВАЖНО 2 (копия словаря): Users — общий Dictionary<uint,User>, его
+        /// меняют потоки сети (AddUser/Remove). Send — async void: исключение
+        /// внутри него НЕ долетает до нашего catch, а вот enumerating по живому
+        /// словарю бросает InvalidOperationException и обрывает рассылку посреди
+        /// цикла — часть игроков (или все) не получают ssi/ssc, табло не
+        /// обновляется. Поэтому снимок списка под lock(this) (все writers
+        /// состояния мяча тоже под этим монитором), отправка — вне перебора.
         /// </summary>
         private void SendEvent(string packet)
         {
-            foreach (var pair in Users)
+            List<KeyValuePair<uint, User>> snapshot;
+            lock (this)
+                snapshot = Users.ToList();
+            foreach (var pair in snapshot)
             {
                 try { pair.Value.Send(pair.Key + "|" + packet); } catch { }
             }
@@ -357,16 +419,22 @@ namespace Do.serverGame
         /// <summary>Рассылка готового пакета (с префиксом) всем игрокам карты.</summary>
         private void Broadcast(string packet)
         {
-            foreach (var pair in Users)
+            List<User> snapshot;
+            lock (this)
+                snapshot = Users.Values.ToList();
+            foreach (var u in snapshot)
             {
-                try { pair.Value.Send(packet); } catch { }
+                try { u.Send(packet); } catch { }
             }
         }
 
         private void BroadcastMove()
         {
             string mv = "0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + BallMoveTime();
-            foreach (var uid in BallViewers.ToList())
+            List<uint> viewers;
+            lock (this)
+                viewers = BallViewers.ToList();
+            foreach (var uid in viewers)
             {
                 User u;
                 if (Program.Users.TryGetValue(uid, out u))
