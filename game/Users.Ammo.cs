@@ -47,10 +47,13 @@ partial class User
             // нулевые счётчики напрямую — этого достаточно, чтобы клиент отрисовал
             // элементы spaceball и начал слать "n|s|<faction>", который сервер
             // обрабатывает через SetSpaceball().
-            Send("0|n|ssi");
-            Send("0|n|ssc|1|0");
-            Send("0|n|ssc|2|0");
-            Send("0|n|ssc|3|0");
+            // ВНИМАНИЕ: "0|n|ssi" без 6 полей и усечённые "0|n|ssc|<c>|0"
+            // (без newScore/portalID) клиент НЕ разбирает — на табло это не
+            // влияет. Актуальный счёт/скорость мяча на поле рассылает
+            // Map.SendSpaceballTo (полные ssi|...|speed|leader и
+            // ssc|company|score|portalID), здесь остаётся только заглушка
+            // формата, чтобы клиент инициализировал элементы spaceball.
+            Send("0|n|ssi|0|0|0|0|0");
             // this.Send("0|m|" + this.mapId + "|" + this.Ship.x + "|" + this.Ship.y);
             Send("0|A|BS|0/0/" + Ship.dmgbooster + "/" + Ship.shieldbooster + "/0/0/0/" + Ship.hpbooster);
             Send("0|n|d|" + UserId + "|" + Ship.DronePacket);
