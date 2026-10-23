@@ -244,7 +244,7 @@ partial class User
                             }
                             catch (Exception e) { }
                         }
-                        update = Program.Users[id].GetXY();
+                    var    update = Program.Users[id].GetXY();
 
                         using (var dbClient = Program.Manager.getQueryreactor())
                         {

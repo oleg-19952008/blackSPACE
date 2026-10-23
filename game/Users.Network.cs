@@ -243,6 +243,17 @@ partial class User
                         }
                         else if (packetHeader.StartsWith("RDY"))
                         {
+                            // Клиент присылает "RDY|MAP" когда полностью загрузил карту.
+                            // Раньше пакет игнорировался; из-за этого, если на момент
+                            // AddUser словарь Program.Users ещё не содержал игрока,
+                            // spaceball-пакеты (ssi/sss/ssc/f|C|900) не отправлялись
+                            // вообще — ни мяча, ни окна scoreboard. Повторяем выдачу
+                            // события при готовности карты (метод идемпотентен).
+                            if (MapId == Do.serverGame.Map.SpaceballFieldMap &&
+                                Program.Maps.ContainsKey(MapId))
+                            {
+                                Program.Maps[MapId].SendSpaceballTo(UserId);
+                            }
                         }
 
                         else if (packetHeader.StartsWith("SEL"))

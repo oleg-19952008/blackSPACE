@@ -44,11 +44,12 @@ namespace Do.serverGame
 
                 UpdateAlienVisibility(userId, nX, nY);
                 UpdatePlayersVisibility(userId, nX, nY, movementPacket);
-                // Spaceball: мяч виден/скрыт по мере приближения-удаления игрока.
+                // Spaceball: мяч — событие поля, виден всем игрокам карты без
+                // радиуса. Здесь только гарантируем показ (метод идемпотентен);
+                // раньше применялся ViewRange, из-за чего мяч «исчезал» у краёв.
                 if (_id == SpaceballFieldMap)
                 {
-                    int ballDist = Distance.Get(BallX, nX, BallY, nY);
-                    UpdateBallVisibility(userId, ballDist < ViewRange);
+                    UpdateBallVisibility(userId);
                 }
 
                 // Пересчёт позиции после интерполяции для зон безопасности/радиации
