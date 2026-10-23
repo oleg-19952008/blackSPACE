@@ -53,23 +53,25 @@ namespace Do.serverGame
         private const int FieldWidth = 41600, FieldHeight = 25600;
 
         // Ворота трёх компаний: company 1=MMO, 2=EIC, 3=VRU.
-        // Координаты сняты с реальных порталов события на карте 4-4 (клиент
-        // показывает их игроку — туда и должен катиться мяч):
-        //   VRU — верх (28006|24074), MMO — лево (6035|12998), EIC — низ (28029|3034).
-        // Ранее стояли произвольные точки («угловые», потом середины сторон
-        // поля) — мяч катился мимо видимых клиентом ворот, игрок видел «в бок».
-        // portalID в ssc = companyID ворот (1..3), см. SpaceballPortalOrder.
+        // Координаты — ДАЛЬНИЕ порталы события на карте 4-4, замеренные с
+        // клиента: MMO {6035|12998} (лево), EIC {28029|3034} (низ),
+        // VRU {28006|24074} (верх). Мяч обязан катиться именно к ним.
+        // ГЕОМЕТРИЯ ПОЛЯ: на каждом конце поля стоят РАЗНЫЕ корпоративные
+        // порталы (например, верх — VRU, а низ — EIC). Раньше CheckGoal
+        // перебирал ВСЕ три точки: мяч, летящий вверх к дальним воротам VRU,
+        // по пути проходил радиус нижнего портала EIC — и клиент показывал
+        // анимацию «ближних» (пройденных по дороге) ворот вместо дальних.
+        // Теперь гол проверяется ТОЛЬКО по воротам ударившей компании
+        // (_ballHitter): посторонние порталы не активируются вообще.
         private static readonly Dictionary<int, int[]> SpaceballGoals =
             new Dictionary<int, int[]>
             {
-                { 1, new[] { 6035, 12998 } },    // MMO  (левые ворота)
-                { 2, new[] { 28029, 3034 } },    // EIC  (нижние ворота)
-                { 3, new[] { 28006, 24074 } },   // VRU  (верхние ворота)
+                { 1, new[] { 6035, 12998 } },    // MMO — левые дальние ворота
+                { 2, new[] { 28029, 3034 } },    // EIC — нижние дальние ворота
+                { 3, new[] { 28006, 24074 } },   // VRU — верхние дальние ворота
             };
 
-        // Стабильный порядок ворот для portalID в ssc. По дампу оригинального
-        // сервера: гол EIC (company 2) = "0|n|ssc|2|1|1" -> portalID = companyID
-        // (MMO=1, EIC=2, VRU=3), НЕ индекс 0..2.
+        // Стабильный порядок ворот для рассылки текущего счёта (ssc при входе).
         private static readonly int[] SpaceballPortalOrder = { 1, 2, 3 };
 
         private Thread _spaceballThread;
@@ -248,36 +250,35 @@ namespace Do.serverGame
 
         private void CheckGoal()
         {
-            // КОПИЯ словаря ворот: ниже под lock(this) вызывается ResetBall ->
-            // BroadcastMove, который может выкинуть отвалившегося игрока из
-            // Users; если бы в этот момент мы шли по SpaceballGoals, а другой
-            // поток менял словарь — коллекция была бы «изменена» и цикл упал
-            // бы с InvalidOperationException (гол не засчитан, табло молчит).
-            foreach (var goal in SpaceballGoals.ToList())
-            {
-                int idx = goal.Key; // portalID = companyID ворот (см. дамп: ssc|2|1|1)
-                if (Distance.Get(goal.Value[0], BallX, goal.Value[1], BallY) >= GoalRadius)
-                    continue;
+            // Проверяем ТОЛЬКО дальние ворота ударившей компании (_ballHitter).
+            // Раньше цикл шёл по всем трём точкам: мяч, летящий вверх к своим
+            // воротам VRU, по пути входил в радиус нижнего портала EIC — и
+            // клиент активировал «ближние» (пройденные по дороге) ворота, а
+            // очко доставалось не той компании. Сторонние порталы теперь не
+            // проверяются вообще.
+            int scorer = _ballHitter;
+            if (scorer < 1 || scorer > 3) return;
+            int[] goal;
+            if (!SpaceballGoals.TryGetValue(scorer, out goal)) return;
+            if (Distance.Get(goal[0], BallX, goal[1], BallY) >= GoalRadius)
+                return;
 
-                // Пробиты ворота компании goal.Key — очко ЕЙ.
-                int scorer = goal.Key;
-                SpaceballScore[scorer] = SpaceballScore.ContainsKey(scorer) ? SpaceballScore[scorer] + 1 : 1;
-                int newScore = SpaceballScore[scorer];
-                ResetBall(); // стоп-состояние + возврат в центр + рассылка позиции
+            SpaceballScore[scorer] = SpaceballScore.ContainsKey(scorer) ? SpaceballScore[scorer] + 1 : 1;
+            int newScore = SpaceballScore[scorer];
+            ResetBall(); // стоп-состояние + возврат в центр + рассылка позиции
 
-                // Последовательность пакетов при голе (проверена на клиенте):
-                //   0|n|ssi|<mmo>|<eic>|<vru>|0|<scorer>   — пересборка табло
-                //   0|n|sss|1|0  /  0|n|sss|2|0  /  0|n|sss|3|0 — сброс скоростей
-                //   0|n|ssc|<scorer>|<newScore>|<portalID> — фиксация гола +
-                //        анимация портала. portalID = companyID ворот (1..3): гол EIC = "ssc|2|1|1".
-                SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
-                          "|0|" + scorer);
-                for (int c = 1; c <= 3; c++)
-                    SendEvent("sss|" + c + "|0");
-                SendEvent("ssc|" + scorer + "|" + newScore + "|" + idx);
-                Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + newScore + ").");
-                break;
-            }
+            // Последовательность пакетов при голе (проверена на клиенте):
+            //   0|n|ssc|<scorer>|<newScore>|<portalID> — фиксация гола +
+            //        анимация ДАЛЬНИХ ворот забившей компании. portalID =
+            //        companyID её ворот (1..3): гол EIC = "0|n|ssc|2|1|1".
+            //   0|n|sss|1|0 / sss|2|0 / sss|3|0        — сброс скоростей
+            //   0|n|ssi|<mmo>|<eic>|<vru>|0|<scorer>   — пересборка табло
+            SendEvent("ssc|" + scorer + "|" + newScore + "|" + scorer);
+            for (int c = 1; c <= 3; c++)
+                SendEvent("sss|" + c + "|0");
+            SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
+                      "|0|" + scorer);
+            Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + newScore + ").");
         }
 
         private void ResetBall()
