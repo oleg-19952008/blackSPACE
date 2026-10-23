@@ -11,6 +11,10 @@ namespace Do.Assembly
     {
         public uint PetId;
         public bool PetActive = false, Kami = false, GuardMode = false, Destroyed = false;
+        // Выбранный механизм (gear): 101 — пассивный (по умолчанию), 102 — guard,
+        // 1/2/6/7 — доп. механизмы. Хранится на сервере, чтобы после смены карты
+        // восстанавливать в UI ровно тот механизм, что был выбран до перехода.
+        public int SelectedGear = 101;
         public uint KamikazeLvl;
         public int Hp, Shield, Experience, Damage;
         public int X, Y;
@@ -41,36 +45,19 @@ namespace Do.Assembly
                 var owner = Program.Users[UserId];
                 var exp = owner.Ship.exp / 900;
 
-                // Инициализация модуля дрона на клиенте. Раньше этот пакет был
-                // условным (зависел от флагов ClientPetInitialized/_petInitSent,
-                // которые никогда не устанавливались в нормальном потоке входа),
-                // из-за чего на ПЕРВОМ включении пета клиент не получал "0|PET|I"
-                // и кнопки выбора механизмов оставались заблокированными. Только
-                // после выключения ("0|PET|D") и повторного включения окно
-                // пересоздавалось и механизмы становились кликабельными — отсюда
-                // баг "механизмы выбираются только со второго раза".
-                // Теперь "I" отправляется безусловно при каждом Activate, окно
-                // пета инициализируется корректно с первого включения.
+                // ВАЖНО: даже если "0|PET|I|1|1|1" уже уходил при логине
+                // (SendUserShit), перед открытием окна пета его нужно отправить
+                // ЕЩЁ РАЗ. Первый (логинный) пакет клиент обрабатывает в момент,
+                // когда UI-модуль дрона ещё не готов, и окно остаётся
+                // "неинициализированным" — механизмы не выбираются с первого
+                // раза. Повторная отправка прямо перед пакетами окна приводит
+                // UI в рабочее состояние сразу.
                 owner.Send("0|PET|I|1|1|1");
                 owner.Send("0|PET|S|1|15|" + exp + "|" + (exp + 10000) + "|999|999|999|999|1|15|1|[PET 15] " + owner.Ship.Name);
 
-                // Полный набор доступных режимов, объявляем их активными для UI
-                // (кнопки не должны быть серыми), затем синхронизируем реальное
-                // состояние: по умолчанию всегда выбран ПАССИВНЫЙ механизм (101).
-                owner.Send("0|PET|G|A|101"); // passive
-                owner.Send("0|PET|G|A|102"); // guard
-                owner.Send("0|PET|G|A|1");   // autoloot
-                owner.Send("0|PET|G|A|2");   // rescollect
-                owner.Send("0|PET|G|A|6");   // repair
-                owner.Send("0|PET|G|A|7");   // kami
-                owner.Send("0|PET|G|D|102"); // пассивный — единственный выбранный
-                owner.Send("0|PET|G|D|1");   // по умолчанию
-                owner.Send("0|PET|G|D|2");
-                owner.Send("0|PET|G|D|6");
-                owner.Send("0|PET|G|D|7");
-                owner.Send("0|PET|G|SEL|101"); // выделяем passive в UI ПОСЛЕ всех D,
-                // чтобы он гарантированно остался подсвеченным (порядок пакетов важен:
-                // SEL до D приводил к тому, что подсветку сбрасывало)
+                // Синхронизация списка механизмов в UI: все доступны, выбран тот,
+                // что реально активен (по умолчанию — пассивный 101).
+                SendGearSync();
 
                 PetActive = true;
                 Destroyed = false;
@@ -90,6 +77,72 @@ namespace Do.Assembly
                 Out.WriteLine("Pet.Activate failed for user " + UserId + ": " + e.Message + "\n" + e.StackTrace, "Pet", ConsoleColor.Red);
             }
         }
+        /// <summary>
+        /// Синхронизация списка механизмов в окне пета: все механизмы доступны,
+        /// подсвечен только реально выбранный (SelectedGear, по умолчанию 101 —
+        /// пассивный). Отправляется при Activate и после смены карты.
+        /// Порядок важен: сначала A для всех, затем D для невыбранных, затем SEL.
+        /// </summary>
+        public void SendGearSync()
+        {
+            var owner = Program.Users[UserId];
+            owner.Send("0|PET|G|A|101"); // passive
+            owner.Send("0|PET|G|A|102"); // guard
+            owner.Send("0|PET|G|A|1");   // autoloot
+            owner.Send("0|PET|G|A|2");   // rescollect
+            owner.Send("0|PET|G|A|6");   // repair
+            owner.Send("0|PET|G|A|7");   // kami
+            foreach (var gear in new[] { 101, 102, 1, 2, 6, 7 })
+            {
+                if (gear != SelectedGear)
+                    owner.Send("0|PET|G|D|" + gear);
+            }
+            owner.Send("0|PET|G|SEL|" + SelectedGear);
+        }
+
+        /// <summary>
+        /// Восстановление пета на новой карте после перехода (портал/прыжок):
+        /// если пет был включён до перехода, он должен остаться видимым и с тем
+        /// же выбранным механизмом; если выключен — клиентское окно обязано
+        /// показать выключенное состояние (иначе баг "окно показывает включён,
+        /// а по факту пета нет").
+        /// </summary>
+        public void RestoreAfterMapChange()
+        {
+            try
+            {
+                if (!Program.Users.ContainsKey(UserId)) return;
+                // Старые циклы движения/атаки текущего пета останавливаем:
+                // PetActive == false заставит их выйти на следующей итерации.
+                var wasActive = PetActive;
+                PetActive = false;
+                if (wasActive)
+                {
+                    var owner = Program.Users[UserId];
+                    PetActive = true;
+                    X = owner.Ship.GetPosX();
+                    Y = owner.Ship.GetPosY();
+                    owner.Send("0|PET|I|1|1|1");
+                    SendGearSync();
+                    for (var index = 0; index < Program.Maps[owner.MapId].Users.Count; index++)
+                    {
+                        Program.Maps[owner.MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (owner.UserId + 1000) + "|15|[PET 15] " + owner.Ship.Name + " |" + owner.Ship.factionId + "|1|1|" + owner.Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
+                    }
+                    Movement();
+                    AttackLoop();
+                }
+                else
+                {
+                    // Пет выключен — гасим "фантомное" включённое состояние окна.
+                    Program.Users[UserId].Send("0|PET|D");
+                }
+            }
+            catch (Exception e)
+            {
+                Out.WriteLine("Pet.RestoreAfterMapChange failed for user " + UserId + ": " + e.Message, "Pet", ConsoleColor.Red);
+            }
+        }
+
         public void DeActivate()
         {
             try
@@ -146,6 +199,10 @@ namespace Do.Assembly
                 Kami = false;
                 var packet = content.Split('|');
                 var gear = Convert.ToInt32(packet[3]);
+                // Запоминаем выбранный механизм, чтобы после смены карты
+                // восстановить в UI ровно его.
+                SelectedGear = gear;
+                SendGearSync();
                 switch (gear)
                 {
                     case 7:

@@ -70,6 +70,17 @@ namespace Do.serverGame
             SendPortals(userId);
             SendMines(userId);
             SendCargos(userId);
+            // Синхронизация состояния пета после смены карты: раньше сервер ничего
+            // не слал про пета при переходе, и клиентское окно продолжало показывать
+            // "включён", хотя пет на новой карте отсутствовал. Теперь: если пет был
+            // включён — восстанавливаем его (с тем же выбранным механизмом), если
+            // выключен — явно отправляем "0|PET|D".
+            try
+            {
+                var pet = Program.Users[userId].Pet;
+                if (pet != null) pet.RestoreAfterMapChange();
+            }
+            catch (Exception) { }
             if (Users[userId].Ship.teleported)
             {
                 FinishFirstTeleport(userId);
