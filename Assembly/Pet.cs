@@ -38,27 +38,37 @@ namespace Do.Assembly
         {
             try
             {
-              
-                var exp = Do.game.User.exp_/900;
-            
+                // exp_ (статическое поле Users.PvE.cs) заполняется только при получении урона,
+                // поэтому на "первом включении" после входа в игру он мог быть 0 (или опытом
+                // другого игрока) -> PET|S отправлялся с кривым опытом и клиент не давал
+                // выбрать режимы. Берём реальный опыт корабля владельца напрямую.
+                var exp = Program.Users[UserId].Ship.exp / 900;
+
                 PetActive = true;
+                Destroyed = false;
                 Speed = Program.Users[UserId].Ship.speed;
                 X = Program.Users[UserId].Ship.GetPosX();
                 Y = Program.Users[UserId].Ship.GetPosY();
+                // Инициализация статуса дрона (0|PET|I) должна приходить ДО списка и режимов,
+                // иначе клиент считает дрон неинициализированным и блокирует выбор режимов,
+                // пока модуль не "прогонят" через выкл/вкл.
                 Program.Users[UserId].Send("0|PET|I|1|1|1");
                 Program.Users[UserId].Send("0|PET|S|1|15|"+ exp +"|"+(exp+10000)+"|999|999|999|999|1|15|1|[PET 15] " + Program.Users[UserId].Ship.Name);
-         
+
+                // Полный набор доступных режимов. Раньше отправлялись только passive/guard/kami,
+                // из-за чего часть кнопок выбора механизмов была неактивна до перезапуска пета.
                 Program.Users[UserId].Send("0|PET|G|A|101"); // passive
                 Program.Users[UserId].Send("0|PET|G|SEL|101");
                 Program.Users[UserId].Send("0|PET|G|A|102"); // guard
-                                                             //Program.Users[userID].Send("0|PET|G|A|1"); // autolot
-                                                             //Program.Users[userID].Send("0|PET|G|A|2"); // rescoll
-                                                             //Program.Users[UserId].Send("0|PET|G|A|6"); // rep
-                Program.Users[UserId].Send("0|PET|G|A|7"); // kami
-
-           
-
-                //  this.Send("0|PET|S|15|12|exp|exp|hp|maxhp|shd|maxshd|fuel|maxfuel|15|14|13");
+                Program.Users[UserId].Send("0|PET|G|A|1");   // autoloot
+                Program.Users[UserId].Send("0|PET|G|A|2");   // rescollect
+                Program.Users[UserId].Send("0|PET|G|A|6");   // repair
+                Program.Users[UserId].Send("0|PET|G|A|7");   // kami
+                Program.Users[UserId].Send("0|PET|G|D|102"); // по умолчанию активен только passive
+                Program.Users[UserId].Send("0|PET|G|D|1");
+                Program.Users[UserId].Send("0|PET|G|D|2");
+                Program.Users[UserId].Send("0|PET|G|D|6");
+                Program.Users[UserId].Send("0|PET|G|D|7");
                 for (var index = 0; index < Program.Maps[Program.Users[UserId].MapId].Users.Count; index++)
                 {
                     var s = Program.Users[UserId];
@@ -158,7 +168,7 @@ namespace Do.Assembly
                     Program.Users[UserId].Send("0|A|STD|Kamikaze is on cooldown! " + a + " seconds left!");
                     return;
                 }
-                var exp = Do.game.User.exp_;
+                var exp = Program.Users[UserId].Ship.exp; // как в Activate: реальный опыт владельца, а не статический exp_
                 KamiMove();
                 await Task.Delay(3500);
                 var damage = (exp / 2010) * 2;
