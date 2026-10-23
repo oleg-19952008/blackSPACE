@@ -190,16 +190,41 @@ partial class User
                 switch (num)
                 {
                     case 3:
-                        var update = Program.Users[id].GetXY();
+                        // ГИБЕЛЬ ИГРОКА ОТ NPC: игрок должен возрождаться на
+                        // СТАРТОВОЙ карте своей фракции, а не там, где умер.
+                        // Раньше в БД писались координаты места гибели (GetXY),
+                        // и при следующем входе игрока выбрасывало ровно на то
+                        // же место, где он помер.
                         Program.Maps[MapId].RemoveUser(id);
                         Program.DisconectUser2(id);
                         Ship.selectedUserId = 0;
+                        Ship.isAttacking = false;
+                        Ship.destroyed = false;
+                        Ship.HP = Ship.maxHP;
+                        Ship.shield = Ship.maxShield;
+
+                        ushort homeMap; int homeX, homeY;
+                        if (!TryGetHomeSpawn(out homeMap, out homeX, out homeY))
+                        {
+                            // Страховка: если стартовая карта неизвестна — пишем
+                            // текущие координаты (прежнее поведение).
+                            var cur = GetXY();
+                            homeMap = (ushort)cur[2]; homeX = cur[0]; homeY = cur[1];
+                        }
+                        Ship.x = homeX;
+                        Ship.y = homeY;
+                        MapId = homeMap;
 
                         using (var dbClient = Program.Manager.getQueryreactor())
                         {
-                            dbClient.query("UPDATE server_1_players SET x = '" + update[0] + "',y = '" + update[1] + "',mapId = '" + update[2] + "' WHERE playerID = '" +
+                            dbClient.query("UPDATE server_1_players SET x = '" + homeX + "',y = '" + homeY + "',mapId = '" + homeMap + "' WHERE playerID = '" +
                                            UserId + "'");
                         }
+                        // Фоновый SavePositionToDatabase() не должен перезатереть
+                        // точку респауна координатами места гибели.
+                        _lastSavedMapId = homeMap;
+                        _lastSavedX = homeX;
+                        _lastSavedY = homeY;
                         foreach (var pair in Program.Users[id].PlayersInRange)
                         {
                             try

@@ -463,6 +463,24 @@ partial class User
             }
         }
 
+        /// <summary>
+        /// Стартовая точка возрождения игрока: центр безопасной зоны его фракции
+        /// (MMO 1-1, EIC 5-1, VRU 9-9). Используется при гибели, чтобы игрока
+        /// возвращало на стартовую карту, а не оставляло там, где он умер.
+        /// </summary>
+        public bool TryGetHomeSpawn(out ushort mapId, out int x, out int y)
+        {
+            mapId = 0; x = 0; y = 0;
+            var st = FindSpaceballStation(Ship.factionId, true);
+            if (st == null || !Program.Maps.ContainsKey((ushort)st[3])) return false;
+            mapId = (ushort)st[3];
+            // Небольшой разброс вокруг центра базы, чтобы все умершие не спавнились
+            // точкой в точку (координаты валидны: база в центре карты, ±50 px).
+            x = st[1] + Program.Random.Next(-50, 50);
+            y = st[2] + Program.Random.Next(-50, 50);
+            return true;
+        }
+
         public int[] GetXY()
         {
             // СОХРАНЕНИЕ ПОСЛЕДНЕЙ ПОЗИЦИИ: раньше здесь координаты и карта
@@ -535,12 +553,37 @@ partial class User
             {
                 case 1:
 
-                    var update = GetXY();
-
-                    using (var dbClient = Program.Manager.getQueryreactor())
+                    // reason==1 — ГИБЕЛЬ корабля. В отличие от обычного выхода,
+                    // здесь сохраняем не координаты места гибели, а СТАРТОВУЮ
+                    // карту фракции: умерший игрок должен возрождаться на базе,
+                    // а не там, где его убили.
+                    ushort deathHomeMap; int deathHomeX, deathHomeY;
+                    if (TryGetHomeSpawn(out deathHomeMap, out deathHomeX, out deathHomeY))
                     {
-                        dbClient.query("UPDATE server_1_players SET x = '" + update[0] + "',y = '" + update[1] + "',mapId = '" + update[2] + "' WHERE playerID = '" +
+                        Ship.x = deathHomeX;
+                        Ship.y = deathHomeY;
+                        MapId = deathHomeMap;
+                        Ship.destroyed = false;
+                        Ship.HP = Ship.maxHP;
+                        Ship.shield = Ship.maxShield;
+                        _lastSavedMapId = deathHomeMap;
+                        _lastSavedX = deathHomeX;
+                        _lastSavedY = deathHomeY;
+                        using (var dbClient = Program.Manager.getQueryreactor())
+                        {
+                            dbClient.query("UPDATE server_1_players SET x = '" + deathHomeX + "',y = '" + deathHomeY + "',mapId = '" + deathHomeMap + "' WHERE playerID = '" +
+                                           UserId + "'");
+                        }
+                    }
+                    else
+                    {
+                        var update = GetXY();
+
+                        using (var dbClient = Program.Manager.getQueryreactor())
+                        {
+                            dbClient.query("UPDATE server_1_players SET x = '" + update[0] + "',y = '" + update[1] + "',mapId = '" + update[2] + "' WHERE playerID = '" +
                                        UserId + "'");
+                        }
                     }
 
                     break;
