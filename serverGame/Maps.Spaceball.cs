@@ -9,33 +9,40 @@ namespace Do.serverGame
     /// <summary>
     /// Серверная модель события Spaceball на карте 4-4 (mapId 16).
     ///
-    /// Протокол (по клиентской реализации MapEventsAssembly):
-    ///   "ssi|<mmo>|<eic>|<vru>|<speed>|<company>"  INIT_SCOREBOARD — клиент
-    ///       создаёт окно WINDOW_CLASS_SPACEBALL (3 элемента MMO/EIC/VRU) и
-    ///       ставит скорость мяча.
-    ///   "ssc|<company>|<score>|<portalID>"         SET_SCORE — очки компании +
-    ///       анимация портала (portalManager.playPortalAnimation).
-    ///   "sss|<company>|<speed>"                    SET_SPEED — индикатор
-    ///       spaceball_speed на scoreboard.
-    ///   "f|C|<objId>|442|1||Spaceball|<x>|<y>|<company>|0|0|7||0|0" — спавн
-    ///       мяча: ship-pattern id 442 имеет флаг spaceball="true", поэтому
-    ///       клиент рисует его как мяч, ставит иконку mapIcon_spaceball на
-    ///       миникарте и при клике вызывает ShipManager.selectSpaceball()
-    ///       (без пузырей урона). Движение — обычным "0|1|<objId>|<x>|<y>|<angle>".
+    /// Механика:
+    ///  - Мяч — корабль-паттерн 442 (spaceball="true"), компания мяча = 4 (нейтральная).
+    ///  - Мяч НЕ двигается сам за игроками. Он стоит в центре поля, пока его не
+    ///    ударят: игрок стреляет по мячу, и в зависимости от корпорации игрока
+    ///    (1=MMO, 2=EIC, 3=VRU) мяч летит В СТОРОНУ ВОРОТ этой корпорации.
+    ///  - Скорость полёта зависит от суммы урона: чем больше урона нанесли,
+    ///    тем быстрее летит мяч.
+    ///  - Если мяч долетает до ворот корпорации X — очко получает следующая по
+    ///    кругу корпорация (X%3+1): чтобы забить, нужно «пробить» ворота соперника.
+    ///    После гола мяч респавнится в центре, счёт обнуляется у всех скорингов
+    ///    только через ssc.
+    ///
+    /// Протокол (MapEventsAssembly клиента):
+    ///   "ssi|<mmo>|<eic>|<vru>|<speed>|<company>"  INIT_SCOREBOARD
+    ///   "ssc|<company>|<newScore>|<portalID>"      SET_SCORE + анимация портала
+    ///   "sss|<company>|<speed>"                    SET_SPEED (индикатор скорости)
+    ///   "f|C|<objId>|442|1||Spaceball|<x>|<y>|4|0|0|7||0|0" — спавн мяча
+    ///   "0|1|<objId>|<x>|<y>|<angle>"              moveShip (обычное движение)
     /// </summary>
     partial class Map
     {
         public const uint SpaceballBallId = 900;      // id мяча (свободен: NPC < 500, игроки >= 1000)
         public const ushort SpaceballFieldMap = 16;   // карта 4-4
         public const int SpaceballPatternId = 442;    // XML-паттерн с флагом spaceball="true"
-        private const int BallSpeed = 1200;           // базовая скорость мяча (для ssi/sss)
+        public const int SpaceballCompanyId = 4;      // у мяча своей корпорации нет — нейтральная 4
+        private const int BallBaseSpeed = 800;        // скорость при минимальном ударе
+        private const int BallMaxSpeed = 6000;        // потолок скорости мяча
 
         // Ворота трёх компаний: company 1=MMO, 2=EIC, 3=VRU.
         // portalID в ssc — индекс ворот, в которые забит мяч (0..2).
         private static readonly Dictionary<int, int[]> SpaceballGoals =
             new Dictionary<int, int[]>
             {
-                { 1, new[] { 20800, 300 } },     // MMO  (левый край)
+                { 1, new[] { 20800, 300 } },     // MMO  (нижний край)
                 { 2, new[] { 20500, 12500 } },   // EIC  (правый верх)
                 { 3, new[] { 300, 12500 } },     // VRU  (левый верх)
             };
@@ -43,9 +50,11 @@ namespace Do.serverGame
         private Thread _spaceballThread;
         private volatile bool _spaceballRunning;
         public int BallX = 20800, BallY = 12800;   // центр поля (граница карты 16 — 41600x25600)
-        private int _ballTargetX = 20800, _ballTargetY = 12800;
-        private int _ballSpeed = BallSpeed;
-        private int _ballHolder = 0;               // компания, «ведущая» мяч (последний удар)
+        private int _ballVX = 0, _ballVY = 0;      // вектор скорости мяча (px/сек)
+        private int _ballSpeed = 0;                // текущая скорость (0 = мяч стоит)
+        private int _ballHitter = 0;               // корпорация, последним ударившая мяч
+        private double _ballDamage = 0;            // накопленный урон текущего полёта -> скорость
+        private int _ballAngle = 730;              // визуальный угол движения (для moveShip)
         // Счёт: всегда ровно 3 компании (1=MMO, 2=EIC, 3=VRU).
         public readonly Dictionary<int, int> SpaceballScore = new Dictionary<int, int> { { 1, 0 }, { 2, 0 }, { 3, 0 } };
 
@@ -64,12 +73,18 @@ namespace Do.serverGame
             {
                 while (_spaceballRunning)
                 {
+                    string move = null;
                     lock (this)
                     {
-                        MoveBallStep();
-                        CheckGoal();
+                        if (_ballSpeed > 0)
+                        {
+                            MoveBallStep();
+                            CheckGoal();
+                        }
+                        if (_ballSpeed > 0)
+                            move = "0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle;
                     }
-                    Broadcast("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|730");
+                    if (move != null) Broadcast(move);
                     Thread.Sleep(MovementTickMs);
                 }
             }
@@ -79,51 +94,18 @@ namespace Do.serverGame
             }
         }
 
-        /// <summary>
-        /// Мяч катится к ближайшему игроку; догнав — «получает удар»: летит в
-        /// случайную точку поля, а ведущей компанией становится компания игрока
-        /// (она же засчитывается при голе в чужие ворота).
-        /// </summary>
+        /// <summary>Шаг полёта мяча по инерции (без самонаведения на игроков).</summary>
         private void MoveBallStep()
         {
-            User nearest = null;
-            double best = double.MaxValue;
-            foreach (var u in Users.Values)
-            {
-                var d = Distance.Get(u.Ship.x, BallX, u.Ship.y, BallY);
-                if (d < best) { best = d; nearest = u; }
-            }
-            if (nearest != null && best < 2500)
-            {
-                _ballTargetX = nearest.Ship.x;
-                _ballTargetY = nearest.Ship.y;
-            }
-            else if (Program.Random.Next(0, 12) == 0)
-            {
-                _ballTargetX = Program.Random.Next(500, 41100);
-                _ballTargetY = Program.Random.Next(500, 25100);
-            }
+            double dt = MovementTickMs / 1000.0;
+            BallX += (int)(_ballVX * dt);
+            BallY += (int)(_ballVY * dt);
 
-            var dist = Distance.Get(_ballTargetX, BallX, _ballTargetY, BallY);
-            int stepPx = Math.Max(200, _ballSpeed / 3);
-            if (dist <= stepPx)
+            // Мяч вылетел за пределы поля или долетел «в никуда» — возврат в центр.
+            if (BallX < 0 || BallX > 41600 || BallY < 0 || BallY > 25600)
             {
-                BallX = _ballTargetX;
-                BallY = _ballTargetY;
-                if (nearest != null && best < 2500)
-                {
-                    // «Удар»: мяч отлетает в случайную точку поля.
-                    _ballTargetX = Program.Random.Next(500, 41100);
-                    _ballTargetY = Program.Random.Next(500, 25100);
-                    if (nearest.Ship.factionId >= 1 && nearest.Ship.factionId <= 3)
-                        _ballHolder = nearest.Ship.factionId;
-                }
-            }
-            else
-            {
-                var dir = Math.Atan2(_ballTargetY - BallY, _ballTargetX - BallX);
-                BallX += (int)(Math.Cos(dir) * stepPx);
-                BallY += (int)(Math.Sin(dir) * stepPx);
+                ResetBall();
+                Broadcast("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
             }
         }
 
@@ -132,23 +114,34 @@ namespace Do.serverGame
             int goalIdx = 0;
             foreach (var goal in SpaceballGoals)
             {
-                if (Distance.Get(goal.Value[0], BallX, goal.Value[1], BallY) >= 400)
+                if (Distance.Get(goal.Value[0], BallX, goal.Value[1], BallY) >= 800)
                 {
                     goalIdx++;
                     continue;
                 }
-                // Забивает компания, последняя ударившая мяч (или ведущая счёт).
-                int scorer = _ballHolder != 0 ? _ballHolder : goal.Key;
+                // Забито в ворота компании goal.Key: очко получает следующая по
+                // кругу корпорация (команда атакующего «пробивает» чужие ворота).
+                int scorer = goal.Key % 3 + 1;
                 SpaceballScore[scorer] = (SpaceballScore.ContainsKey(scorer) ? SpaceballScore[scorer] : 0) + 1;
                 // ssc|company|newScore|portalID — очки + анимация портала.
                 Broadcast("ssc|" + scorer + "|" + SpaceballScore[scorer] + "|" + goalIdx);
                 Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + SpaceballScore[scorer] + ").");
-                // Респавн мяча в центр поля.
-                BallX = 20800; BallY = 12800;
-                _ballTargetX = 20800; _ballTargetY = 12800;
-                _ballHolder = 0;
+                ResetBall();
+                Broadcast("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
                 break;
             }
+        }
+
+        private void ResetBall()
+        {
+            BallX = 20800; BallY = 12800;
+            _ballVX = 0; _ballVY = 0;
+            _ballSpeed = 0;
+            _ballHitter = 0;
+            _ballDamage = 0;
+            Broadcast("sss|1|0");
+            Broadcast("sss|2|0");
+            Broadcast("sss|3|0");
         }
 
         /// <summary>
@@ -160,13 +153,14 @@ namespace Do.serverGame
         {
             if (_id != SpaceballFieldMap || !Users.ContainsKey(userId)) return;
             var u = Users[userId];
+            int leader = _ballHitter != 0 ? _ballHitter : 1;
             // 1) INIT_SCOREBOARD: ssi|mmo|eic|vru|speed|companyWithSpeed
             u.Send("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
-                   "|" + _ballSpeed + "|" + (_ballHolder != 0 ? _ballHolder : 1));
-            // 2) SET_SPEED: текущая скорость мяча по компаниям (индикаторы).
+                   "|" + _ballSpeed + "|" + leader);
+            // 2) SET_SPEED: индикаторы (скорость показывает та, кто держит мяч).
             foreach (var c in new[] { 1, 2, 3 })
-                u.Send("sss|" + c + "|" + (c == (_ballHolder != 0 ? _ballHolder : 1) ? _ballSpeed : 0));
-            // 3) Текущие очки (ssc — с анимацией портала не критично на логине).
+                u.Send("sss|" + c + "|" + (c == leader && _ballSpeed > 0 ? _ballSpeed : 0));
+            // 3) Текущие очки.
             int idx = 0;
             foreach (var goal in SpaceballGoals)
             {
@@ -175,20 +169,55 @@ namespace Do.serverGame
             }
             lock (this)
             {
-                // 4) Мяч: корабль с паттерном 442 (spaceball="true") — у клиента
-                //    включается иконка mapIcon_spaceball и selectSpaceball().
+                // 4) Мяч: корабль с паттерном 442 (spaceball="true"), компания 4 —
+                //    нейтральная, своей корпорации у мяча нет.
                 u.Send("f|C|" + SpaceballBallId + "|" + SpaceballPatternId + "|1||Spaceball|" + BallX + "|" + BallY + "|" +
-                       (_ballHolder != 0 ? _ballHolder : 1) + "|0|0|7||0|0");
-                u.Send("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|730");
+                       SpaceballCompanyId + "|0|0|7||0|0");
+                u.Send("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
             }
             StartSpaceball();
         }
 
-        /// <summary>Смена скорости мяча (например, при усиленииleading-компании).</summary>
+        /// <summary>
+        /// «Удар» по мячу: вызывается из боевого кода при попадании по Spaceball.
+        /// Урон накапливается; направление — к воротам корпорации атакующего;
+        /// скорость полёта растёт с суммарным уроном.
+        /// </summary>
+        public void HitSpaceball(int attackerCompany, double damage, int fromX, int fromY)
+        {
+            if (_id != SpaceballFieldMap) return;
+            if (attackerCompany < 1 || attackerCompany > 3) return;
+            lock (this)
+            {
+                _ballHitter = attackerCompany;
+                _ballDamage += Math.Max(1, damage);
+                // Скорость: базовая + прирост от накопленного урона, с потолком.
+                _ballSpeed = Math.Min(BallMaxSpeed, BallBaseSpeed + (int)_ballDamage / 2);
+
+                int[] goal;
+                if (!SpaceballGoals.TryGetValue(attackerCompany, out goal)) return;
+                double dx = goal[0] - BallX, dy = goal[1] - BallY;
+                double len = Math.Sqrt(dx * dx + dy * dy);
+                if (len < 1) len = 1;
+                _ballVX = (int)(dx / len * _ballSpeed);
+                _ballVY = (int)(dy / len * _ballSpeed);
+                // Клиентский угол (градусы*10, смещённый на 180° — как в moveShip).
+                _ballAngle = ((int)(Math.Atan2(-dy, dx) * 180.0 / Math.PI) + 360) % 360 + 180;
+
+                // Индикатор скорости на scoreboard — у корпорации-ударившего.
+                Broadcast("sss|" + attackerCompany + "|" + _ballSpeed);
+                foreach (var c in new[] { 1, 2, 3 })
+                    if (c != attackerCompany) Broadcast("sss|" + c + "|0");
+            }
+            // Sofort показываем новый вектор/позицию.
+            Broadcast("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
+        }
+
+        /// <summary>Смена скорости мяча (например, из админ-команд).</summary>
         public void SetSpaceballSpeed(int speed)
         {
-            _ballSpeed = Math.Max(200, speed);
-            int leader = _ballHolder != 0 ? _ballHolder : 1;
+            _ballSpeed = Math.Max(0, speed);
+            int leader = _ballHitter != 0 ? _ballHitter : 1;
             Broadcast("sss|" + leader + "|" + _ballSpeed);
         }
 

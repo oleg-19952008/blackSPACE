@@ -321,6 +321,14 @@ partial class User
         }
         private void Selalien(uint userId)
         {
+            // Spaceball: мяч не NPC, но выделяется как ship-объект (selectSpaceball).
+            if (userId == Do.serverGame.Map.SpaceballBallId && MapId == Do.serverGame.Map.SpaceballFieldMap &&
+                Program.Maps.ContainsKey(MapId))
+            {
+                Ship.selectedUserId = userId;
+                Send("0|N|" + userId + "|Spaceball|1|1|1|1");
+                return;
+            }
             if (!Program.Maps[MapId].Aliens.ContainsKey(userId) || Program.Maps[MapId].Aliens[userId].Destroyed) return;
             Ship.selectedUserId = userId;
             Send("0|N|" + userId + "|" + Program.Npcs[Program.Maps[MapId].Aliens[userId].TypeId].Name + "|" + Program.Maps[MapId].Aliens[userId].Shield + "|" + Program.Npcs[Program.Maps[MapId].Aliens[userId].TypeId].Shield + "|" + Program.Maps[MapId].Aliens[userId].Hp + "|" + Program.Npcs[Program.Maps[MapId].Aliens[userId].TypeId].Hp);

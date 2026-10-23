@@ -26,6 +26,39 @@ partial class User
             {
                 var selected = Ship.selectedUserId;
 
+                // === Spaceball: мяч на карте 4-4 (id 900) ===
+                // Мяч не является NPC, поэтому обрабатывается отдельно:
+                // урон по нему накапливается сервером (HitSpaceball), сам мяч
+                // летит к воротам корпорации атакующего; пузырей урона клиент не
+                // показывает (spaceball="true" в паттерне 442).
+                if (selected == Do.serverGame.Map.SpaceballBallId && MapId == Do.serverGame.Map.SpaceballFieldMap)
+                {
+                    if (!Ship.isAttacking || !CheckLaser() || LaserCooldownList.Contains(selected) || LaserCooldownList.Count > 2)
+                        return;
+                    var sbMap = Program.Maps[MapId];
+                    double sbDist = Distance.Get(sbMap.BallX, Ship.x, sbMap.BallY, Ship.y);
+                    if (sbDist > 840)
+                    {
+                        if (!Ship.AvisedO) { Ship.AvisedO = true; Send("0|O"); }
+                        return;
+                    }
+                    if (Ship.AvisedO) { Ship.AvisedO = false; Send("0|X"); }
+                    LaserCooldown(selected);
+                    Ship.InRange = true;
+                    Ship.InSecureArea = false;
+                    int sbPower = Convert.ToInt32(Ship.damage * (LaserId == 5 ? 2 : 1));
+                    sbPower += _rnd5.Next(-10, 10);
+                    if (sbPower < 1) sbPower = 1;
+                    string sbPacket = "0|a|" + UserId + "|" + selected + "|" + (LaserId - 1) + "|1|1";
+                    Send(sbPacket);
+                    foreach (var user in PlayersInRange.Where(user => user != UserId))
+                        Program.Users[user].Send(sbPacket);
+                    UpdateShip();
+                    sbMap.HitSpaceball(Ship.factionId >= 1 && Ship.factionId <= 3 ? Ship.factionId : 0,
+                                       sbPower, (int)Ship.x, (int)Ship.y);
+                    return;
+                }
+
                 if (!Ship.isAttacking || selected > 1000 || !CheckLaser() || LaserCooldownList.Contains(selected) || LaserCooldownList.Count > 2)
                 {
                     return;
