@@ -14,11 +14,15 @@ namespace Do.serverGame
     ///    виден ВСЕМ игрокам поля без радиуса видимости.
     ///  - Мяч НЕ двигается сам и НЕ притягивается к игрокам. Он стоит в центре,
     ///    пока по нему не начнут наносить урон.
-    ///  - Направление полёта — к ДАЛЬНИМ воротам стороны, на которой стоит
-    ///    атакующий (ближайший к нему БЛИЖНИЙ портал определяет цель): игрок
-    ///    «бьёт» мяч через всё поле в дальние ворота, активация портала и гол —
-    ///    только там. Вектор задаётся при ударе (прямой полёт); удары «в бок»
-    ///    доворачиваются на створ — см. HitSpaceball/AimAtGoal/NearestFarGoal.
+    ///  - Полёт — ВСЕГДА ОТ центра К точкам ворот из замеров клиента:
+    ///    MMO {6035|12998}, EIC {28029|3034}, VRU {28006|24074}. Цель выбирается
+    ///    по корпорации ударившего (MMO бьёт -> ворота EIC, EIC -> VRU, VRU ->
+    ///    MMO). Гол засчитывается КОМПАНИИ УДАРИВШЕГО (_ballHitter), как в
+    ///    оригинальном DarkOrbit Spaceball; очко владельцу ворот НЕ начисляется.
+    ///    Проверка — только по точке текущей цели (радиус 1500 px, разброс
+    ///    1-2 тыс.), поэтому посторонние порталы не активируются. Вектор
+    ///    задаётся при ударе (прямой полёт); удары «в бок» доворачиваются на
+    ///    створ — см. HitSpaceball/AimAtGoal/ResolveTargetGoal.
     ///  - Баланс урона: 3000 — малый, 75000 — мощный. Мяч трогается при накопленном
     ///    уроне ~12000 (BallMoveThreshold) со скорости корабля (~450 px/s);
     ///    при 75000+ — максимум (~600 px/s), сопоставимо с быстро летящим
@@ -47,43 +51,25 @@ namespace Do.serverGame
         private const int BallMaxSpeed = 600;               // потолок (на ~75k+): не быстрее 600 —
                                                             // игрок на 500-600 может догнать мяч
         private const double BallDamageDecayPerSec = 2500;  // остывание урона при простое
-        private const int GoalRadius = 1200;                // радиус створа ворот
+        private const int GoalRadius = 1500;                // радиус створа ворот (разброс 1-2 тыс. px, по требованию)
 
         // Центр поля; границы карты 16 — 41600 x 25600.
         private const int FieldCenterX = 20800, FieldCenterY = 12800;
         private const int FieldWidth = 41600, FieldHeight = 25600;
 
         // === ВОРОТА (замерены с клиента, см. INPUT игрока у порталов) ===
-        // На поле 4-4 шесть порталов события: у каждой компании есть БЛИЖНИЕ
-        // (стоят рядом со стартом игрока) и ДАЛЬНИЕ (через всё поле). Замеры:
-        //   игрок у {28020|23974} — «это ворота VRU»      => VRU ближние {28006|24074}
-        //   игрок у {5983|13002}  — «это ворота MMO»      => MMO ближние {5983|13002}
-        //   игрок у {27998|2983}  — «это ворота EIC»      => EIC ближние {27998|2983}
-        // Дальние (в них забивают — туда обязан катиться мяч):
-        //   дальние MMO {6035|12998}, дальние EIC {28029|3034}, дальние VRU {28006|24074}
-        //
-        // КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ («активируются ближние, а не дальние»):
-        // раньше цель выбиралась по _ballHitter — корпорации, ПОСЛЕДНИМ ударившей
-        // мяч. Игрок бьёт мяч с центра на свою станцию (MMO 1-1 => верхняя часть
-        // поля), последний удар всегда наносит та же фракция — и мяч ехал к её же
-        // БЛИЖНИМ воротам. Теперь направление полёта определяется тем, КТО ближе
-        // к мячу в момент удара: игрок у чужих ближних ворот направляет мяч к их
-        // ДАЛЬНЕЙ паре через всё поле (гол засчитывается владельцу дальних ворот).
-        private struct GoalDef
-        {
-            public readonly int NearX, NearY;   // ближние (свои) ворота компании
-            public readonly int FarX, FarY;     // дальние ворота той же компании
-            public readonly int Company;        // 1=MMO, 2=EIC, 3=VRU
-            public GoalDef(int nearX, int nearY, int farX, int farY, int company)
-            { NearX = nearX; NearY = nearY; FarX = farX; FarY = farY; Company = company; }
-        }
-
-        private static readonly GoalDef[] SpaceballGoalDefs =
-            new GoalDef[]
+        // Единственные точки ворот, к которым катится мяч (все они ДАЛЬНИЕ от
+        // центра поля — мяч всегда летит ОТ центра ЧЕРЕЗ ВСЁ ПОЛЕ к ним):
+        //   MMO {6035|12998} (левый край), EIC {28029|3034} (низ),
+        //   VRU {28006|24074} (верх).
+        // Словарь: ключ = companyID ворот (= portalID в ssc, см. дамп сервера:
+        // гол EIC = "0|n|ssc|2|1|1").
+        private static readonly Dictionary<int, int[]> SpaceballGoals =
+            new Dictionary<int, int[]>
             {
-                new GoalDef(5983,  13002, 6035,  12998, 1), // MMO: ближние/дальние (лево)
-                new GoalDef(27998, 2983,  28029, 3034,  2), // EIC: ближние/дальние (низ)
-                new GoalDef(28006, 24074, 28006, 24074, 3), // VRU: ближние/дальние (верх)
+                { 1, new[] { 6035, 12998 } },    // MMO  (левые ворота)
+                { 2, new[] { 28029, 3034 } },    // EIC  (нижние ворота)
+                { 3, new[] { 28006, 24074 } },   // VRU  (верхние ворота)
             };
 
         // Стабильный порядок ворот для рассылки текущего счёта (ssc при входе).
@@ -94,7 +80,7 @@ namespace Do.serverGame
         public int BallX = FieldCenterX, BallY = FieldCenterY; // центр поля
         private int _ballVX = 0, _ballVY = 0;      // вектор скорости мяча (px/сек)
         private int _ballSpeed = 0;                // текущая скорость (0 = мяч стоит)
-        private int _ballHitter = 0;               // корпорация, последним ударившая мяч (чей гол)
+        private int _ballHitter = 0;               // корпорация, последним ударившая мяч (получает очко за гол)
         private int _ballTarget = 0;               // компания ДАЛЬНИХ ворот, к которым летит мяч
         private double _ballDamage = 0;            // накопленный урон -> скорость
         private long _lastHitMs = 0;               // время последнего удара (Environment.TickCount)
@@ -185,9 +171,7 @@ namespace Do.serverGame
         /// Ниже порога — мяч стоит; выше — линейный рост до потолка.
         /// Вектор задаётся ОДИН раз при ударе (прямой полёт, как в футболе):
         /// игрок направляет мяч позицией вокруг него и подправляет новым ударом.
-        /// Цель наводки — _ballTarget (ближайшие к игроку ДАЛЬНИЕ ворота),
-        /// а не корпорация ударившего: иначе MMO-игрок, бьющий мяч со своей
-        /// половины, гнал бы его в собственные ближние ворота.
+        /// Цель наводки — _ballTarget (ДАЛЬНИЕ ворота выбранной цели).
         /// </summary>
         private void ApplyBallVelocity()
         {
@@ -202,8 +186,9 @@ namespace Do.serverGame
             if (t > 1.0) t = 1.0;
             _ballSpeed = BallMinSpeed + (int)((BallMaxSpeed - BallMinSpeed) * t);
 
-            if (_ballTarget < 1 || _ballTarget > 3) { _ballSpeed = 0; return; }
-            AimAtGoal(SpaceballGoalDefs[_ballTarget - 1]);
+            int[] goal;
+            if (!SpaceballGoals.TryGetValue(_ballTarget, out goal)) { _ballSpeed = 0; return; }
+            AimAtGoal(goal);
         }
 
         /// <summary>
@@ -216,9 +201,9 @@ namespace Do.serverGame
         /// вызывается рекурсивно (ApplyBallVelocity -> AimAtGoal -> AimAtGoal),
         /// когда игрок стоит вплотную к своим воротам (мяч уже в створе).
         /// </summary>
-        private void AimAtGoal(GoalDef goal)
+        private void AimAtGoal(int[] goal)
         {
-            double dx = goal.FarX - (double)BallX, dy = goal.FarY - (double)BallY;
+            double dx = goal[0] - (double)BallX, dy = goal[1] - (double)BallY;
             double len = Math.Sqrt(dx * dx + dy * dy);
             if (len < GoalRadius) { _ballVX = 0; _ballVY = 0; return; }
             _ballVX = (int)Math.Round(dx / len * _ballSpeed);
@@ -268,34 +253,37 @@ namespace Do.serverGame
 
         private void CheckGoal()
         {
-            // Гол засчитывается по ДАЛЬНИМ воротам текущей цели (_ballTarget) —
-            // той самой точки, куда мяч был направлен ударом. Раньше цель и очко
-            // брались от корпорации ударившего: игрок бил мяч со своей половины
-            // в сторону своей станции, мяч доходил до БЛИЖНИХ ворот его же
-            // фракции и активировался именно ближний портал. Теперь проверяется
-            // только дальняя точка цели — посторонние порталы не активируются.
+            // Гол проверяется ТОЛЬКО по точке текущей цели _ballTarget (одни
+            // дальние ворота) — посторонние порталы не активируются. Радиус
+            // 1500 px (разброс 1-2 тыс., по требованию).
+            // ОЧКО ПОЛУЧАЕТ КОМПАНИЯ, УДАРИВШАЯ МЯЧ (_ballHitter) — как в
+            // оригинальном DarkOrbit Spaceball и как показывает клиентское
+            // табло: игрок забивает в ЧУЖИЕ ворота, очко — его фракции.
+            // Раньше scorer брался от цели (владельца ворот) — при голе EIC
+            // табло получало "+1 VRU", цифры не совпадали с анимацией портала,
+            // и казалось, что «табло не обновляется / голы не считаются».
             int scorer = _ballHitter;   // очко получает компания, ударившая мяч
             if (scorer < 1 || scorer > 3) return;
-            if (_ballTarget < 1 || _ballTarget > 3) return;
-            GoalDef goal = SpaceballGoalDefs[_ballTarget - 1];
-            if (Distance.Get(goal.FarX, BallX, goal.FarY, BallY) >= GoalRadius)
+            int[] goal;
+            if (!SpaceballGoals.TryGetValue(_ballTarget, out goal)) return;
+            if (Distance.Get(goal[0], BallX, goal[1], BallY) >= GoalRadius)
                 return;
 
             SpaceballScore[scorer] = SpaceballScore.ContainsKey(scorer) ? SpaceballScore[scorer] + 1 : 1;
             int newScore = SpaceballScore[scorer];
+            int portalID = _ballTarget; // ID пробитых ДАЛЬНИХ ворот (1..3)
             ResetBall(); // стоп-состояние + возврат в центр + рассылка позиции
 
             // Последовательность пакетов при голе (проверена на клиенте):
-            //   0|n|ssc|<scorer>|<newScore>|<portalID> — фиксация гола +
-            //        анимация ДАЛЬНИХ ворот забившей компании. portalID =
-            //        companyID её ворот (1..3): гол EIC = "0|n|ssc|2|1|1".
-            //   0|n|sss|1|0 / sss|2|0 / sss|3|0        — сброс скоростей
             //   0|n|ssi|<mmo>|<eic>|<vru>|0|<scorer>   — пересборка табло
-            SendEvent("ssc|" + scorer + "|" + newScore + "|" + scorer);
-            for (int c = 1; c <= 3; c++)
-                SendEvent("sss|" + c + "|0");
+            //   0|n|sss|1|0  /  0|n|sss|2|0  /  0|n|sss|3|0 — сброс скоростей
+            //   0|n|ssc|<scorer>|<newScore>|<portalID> — фиксация гола +
+            //        анимация пробитого портала.
             SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
                       "|0|" + scorer);
+            for (int c = 1; c <= 3; c++)
+                SendEvent("sss|" + c + "|0");
+            SendEvent("ssc|" + scorer + "|" + newScore + "|" + portalID);
             Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + newScore + ").");
         }
 
@@ -347,12 +335,9 @@ namespace Do.serverGame
         /// «Удар» по мячу: вызывается из боевого кода при попадании по Spaceball.
         /// Урон накапливается; скорость полёта растёт с суммарным уроном
         /// (баланс: старт ~12k, пик ~75k).
-        /// ЦЕЛЬ ПОЛЁТА — ДАЛЬНИЕ ворота компании, чей БЛИЖНИЙ портал находится
-        /// ближе всего к атакующему (NearestFarGoal): игрок у своих ближних ворот
-        /// («дома») бьёт мяч через всё поле в дальние ворота этой же стороны —
-        /// активироваться должны именно они. Раньше цель выбиралась по фракции
-        /// ударившего, и мяч ехал к его же ближним порталам («активируются
-        /// ближние, а не дальние»).
+        /// ЦЕЛЬ ПОЛЁТА — ДАЛЬНИЕ ворота ResolveTargetGoal(): по корпорации
+        /// ударившего игрок забивает в ЧУЖИЕ ворота (MMO->EIC, EIC->VRU,
+        /// VRU->MMO), мяч катится через всё поле от центра к их точке.
         /// Направление — от позиции атакующего через мяч (как удар в футболе);
         /// если прямая уходит «в сторону» от цели, вектор доворачивается на створ
         /// (гарантированный полёт в ворота, а не вдоль стороны поля).
@@ -367,7 +352,7 @@ namespace Do.serverGame
             lock (this)
             {
                 _ballHitter = attackerCompany;
-                _ballTarget = NearestFarGoal(fromX, fromY);
+                _ballTarget = ResolveTargetGoal();
                 _ballDamage += Math.Max(1, damage);
                 _lastHitMs = Environment.TickCount;
 
@@ -385,10 +370,10 @@ namespace Do.serverGame
                         _ballVY = (int)Math.Round(dy / len * _ballSpeed);
                         // Проверка: приведёт ли этот удар к ДАЛЬНИМ воротам цели?
                         // Если прямая уходит «в сторону» — целимся прямо на них.
-                        if (_ballTarget >= 1 && _ballTarget <= 3)
+                        int[] goal;
+                        if (SpaceballGoals.TryGetValue(_ballTarget, out goal))
                         {
-                            GoalDef goal = SpaceballGoalDefs[_ballTarget - 1];
-                            double gx = goal.FarX - (double)BallX, gy = goal.FarY - (double)BallY;
+                            double gx = goal[0] - (double)BallX, gy = goal[1] - (double)BallY;
                             double glen = Math.Sqrt(gx * gx + gy * gy);
                             double cos = glen < 1 ? 1 : (dx * gx + dy * gy) / (len * glen);
                             if (cos < 0.85) AimAtGoal(goal); // удар «в сторону» — наводим на створ
@@ -404,23 +389,28 @@ namespace Do.serverGame
         }
 
         /// <summary>
-        /// Компания ДАЛЬНИХ ворот, к которым надо катить мяч: выбирается та
-        /// сторона поля (ближний портал которой стоит рядом с атакующим).
-        /// Игрок «у себя дома» направляет мяч в дальнюю точку своей стороны —
-        /// через всё поле, как в оригинальном Spaceball.
+        /// Компания ВОРОТ, к которым надо катить мяч: это ВСЕГДА дальняя точка
+        /// из SpaceballGoals (MMO {6035|12998} левый край, EIC {28029|3034}
+        /// низ, VRU {28006|24074} верх) — все они стоят на противоположной от
+        /// центра стороне, мяч летит ОТ центра ЧЕРЕЗ ВСЁ ПОЛЕ к ним. Никаких
+        /// «ближних» точек в проверке гола больше нет: CheckGoal сверяется
+        /// только с целью текущего полёта, поэтому посторонние порталы не
+        /// активируются.
+        /// Выбор цели — по корпорации ударившего (игрок забивает в ЧУЖИЕ
+        /// ворота, как в оригинальном DarkOrbit Spaceball):
+        ///   бьёт MMO (1) -> цель EIC (2); бьёт EIC (2) -> цель VRU (3);
+        ///   бьёт VRU (3) -> цель MMO (1).
+        /// Вызывается из HitSpaceball ПОСЛЕ установки _ballHitter.
         /// </summary>
-        private static int NearestFarGoal(int x, int y)
+        private int ResolveTargetGoal()
         {
-            int best = 1;
-            double bestDist = double.MaxValue;
-            for (int i = 0; i < SpaceballGoalDefs.Length; i++)
+            switch (_ballHitter)
             {
-                double ddx = x - (double)SpaceballGoalDefs[i].NearX;
-                double ddy = y - (double)SpaceballGoalDefs[i].NearY;
-                double d = ddx * ddx + ddy * ddy;
-                if (d < bestDist) { bestDist = d; best = SpaceballGoalDefs[i].Company; }
+                case 1: return 2; // MMO бьёт -> ворота EIC (низ)
+                case 2: return 3; // EIC бьёт -> ворота VRU (верх)
+                case 3: return 1; // VRU бьёт -> ворота MMO (лево)
+                default: return 0;
             }
-            return best;
         }
 
         /// <summary>Смена скорости мяча (например, из админ-команд).</summary>
