@@ -23,13 +23,13 @@ namespace Do.serverGame
     ///    при 75000+ — максимум (~600 px/s), сопоставимо с быстро летящим
     ///    кораблём (игроки летают 500-600) — мяч можно догнать.
     ///    Если по мячу долго не бьют, урон «остывает» и мяч останавливается.
-    ///  - Гол: ssc|company|newScore|portalID рассылаться должен ТАКЖЕ как "0|ssc|..."
-    ///    (см. SendEvent — клиент парсит события только с префиксом owner-фрейма).
+    ///  - Гол: ssc|company|newScore|portalID рассылается как "0|n|ssc|..."
+    ///    (см. SendEvent — обязательный префикс "0|n|" для MapEventsAssembly).
     ///
     /// Протокол (MapEventsAssembly клиента):
-    ///   "ssi|<mmo>|<eic>|<vru>|<speed>|<companyWithSpeed>"  INIT_SCOREBOARD
-    ///   "ssc|<company>|<newScore>|<portalID>"               SET_SCORE + анимация портала
-    ///   "sss|<company>|<speed>"                             SET_SPEED (индикатор скорости)
+    ///   "0|n|ssi|<mmo>|<eic>|<vru>|<speed>|<companyWithSpeed>"  INIT_SCOREBOARD
+    ///   "0|n|ssc|<company>|<newScore>|<portalID>"               SET_SCORE + анимация портала
+    ///   "0|n|sss|<company>|<speed>"                             SET_SPEED (индикатор скорости)
     ///   "f|C|<objId>|442|1||Spaceball|<x>|<y>|4|0|0|7||0|0" — спавн мяча
     ///   "0|1|<objId>|<x>|<y>|<angle>"                       moveShip (обычное движение)
     /// </summary>
@@ -58,7 +58,7 @@ namespace Do.serverGame
         //   VRU — верх (28006|24074), MMO — лево (6035|12998), EIC — низ (28029|3034).
         // Ранее стояли произвольные точки («угловые», потом середины сторон
         // поля) — мяч катился мимо видимых клиентом ворот, игрок видел «в бок».
-        // portalID в ssc — индекс ворот (0..2), соответствуют ключу.
+        // portalID в ssc = companyID ворот (1..3), см. SpaceballPortalOrder.
         private static readonly Dictionary<int, int[]> SpaceballGoals =
             new Dictionary<int, int[]>
             {
@@ -67,9 +67,9 @@ namespace Do.serverGame
                 { 3, new[] { 28006, 24074 } },   // VRU  (верхние ворота)
             };
 
-        // Стабильный порядок ворот для portalID в ssc (индекс 0..2 по ключу).
-        // Dictionary<int,...> перебирается в порядке вставки, но явно задаём
-        // массив, чтобы portalID не «поехал» при рефакторинге словаря.
+        // Стабильный порядок ворот для portalID в ssc. По дампу оригинального
+        // сервера: гол EIC (company 2) = "0|n|ssc|2|1|1" -> portalID = companyID
+        // (MMO=1, EIC=2, VRU=3), НЕ индекс 0..2.
         private static readonly int[] SpaceballPortalOrder = { 1, 2, 3 };
 
         private Thread _spaceballThread;
@@ -255,7 +255,7 @@ namespace Do.serverGame
             // бы с InvalidOperationException (гол не засчитан, табло молчит).
             foreach (var goal in SpaceballGoals.ToList())
             {
-                int idx = Array.IndexOf(SpaceballPortalOrder, goal.Key); // стабильный portalID
+                int idx = goal.Key; // portalID = companyID ворот (см. дамп: ssc|2|1|1)
                 if (Distance.Get(goal.Value[0], BallX, goal.Value[1], BallY) >= GoalRadius)
                     continue;
 
@@ -265,20 +265,13 @@ namespace Do.serverGame
                 int newScore = SpaceballScore[scorer];
                 ResetBall(); // стоп-состояние + возврат в центр + рассылка позиции
 
-                // Порядок пакетов важен (см. документацию MapEventsAssembly):
-                //  1) ssi|<mmo>|<eic>|<vru>|<speed>|<companyWithSpeed> — это НЕ
-                //     только инициализация: клиент перерисовывает цифры табло
-                //     именно из него (GuiManager.createSpaceballScoreboard /
-                //     updateScoreboard). Раньше мы слали «ssi|...|0|0» со
-                //     СБРОСОМ скорости — и клиент reset-ил индикаторы/табло,
-                //     из-за чего счёт визуально не обновлялся. Теперь speed =
-                //     текущая скорость мяча (после ResetBall это 0), company =
-                //     забившая корпорация — корректное полное состояние табло.
-                //  2) ssc|<company>|<newScore>|<portalID> — SET_SCORE:
-                //     анимация портала + обновление очков компании.
-                //  3) sss — индикаторы скорости (все в 0, мяч вернулся в центр).
+                // Последовательность пакетов при голе (проверена на клиенте):
+                //   0|n|ssi|<mmo>|<eic>|<vru>|0|<scorer>   — пересборка табло
+                //   0|n|sss|1|0  /  0|n|sss|2|0  /  0|n|sss|3|0 — сброс скоростей
+                //   0|n|ssc|<scorer>|<newScore>|<portalID> — фиксация гола +
+                //        анимация портала. portalID = companyID ворот (1..3): гол EIC = "ssc|2|1|1".
                 SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] +
-                          "|" + _ballSpeed + "|" + scorer);
+                          "|0|" + scorer);
                 for (int c = 1; c <= 3; c++)
                     SendEvent("sss|" + c + "|0");
                 SendEvent("ssc|" + scorer + "|" + newScore + "|" + idx);
@@ -322,9 +315,9 @@ namespace Do.serverGame
             // 2) SET_SPEED: индикатор скорости у держателя мяча.
             for (int c = 1; c <= 3; c++)
                 SendEventTo(u, "sss|" + c + "|" + (c == leader && _ballSpeed > 0 ? _ballSpeed : 0));
-            // 3) Текущие очки (табло). portalID — стабильный индекс ворот.
+            // 3) Текущие очки (табло). portalID = companyID ворот.
             foreach (var c in SpaceballPortalOrder)
-                SendEventTo(u, "ssc|" + c + "|" + SpaceballScore[c] + "|" + Array.IndexOf(SpaceballPortalOrder, c));
+                SendEventTo(u, "ssc|" + c + "|" + SpaceballScore[c] + "|" + c); // portalID = companyID
             // 4) Сам мяч.
             UpdateBallVisibility(userId);
             StartSpaceball();
@@ -396,33 +389,34 @@ namespace Do.serverGame
 
         /// <summary>
         /// Рассылка событийного пакета (ssi/sss/ssc) всем на поле.
-        /// ВАЖНО 1 (префикс): клиент (Flash, DarkOrbit 4.1) матчит события вида
-        /// ssi/sss/ssc ТОЛЬКО в строках формата "<ownerFrame>|<cmd>|...". В
-        /// оригинальном сервере ownerFrame — ИД игрока-владельца окна
-        /// ("11004|ssi|..."), а не "0" — фрейм "0" клиент не ассоциирует ни с
-        /// одним слушателем MapEventsAssembly. Шлём "<uid>|<cmd>|..." каждому.
-        /// ВАЖНО 2 (копия словаря): Users — общий Dictionary<uint,User>, его
-        /// меняют потоки сети (AddUser/Remove). Send — async void: исключение
-        /// внутри него НЕ долетает до нашего catch, а вот enumerating по живому
-        /// словарю бросает InvalidOperationException и обрывает рассылку посреди
-        /// цикла — часть игроков (или все) не получают ssi/ssc, табло не
-        /// обновляется. Поэтому снимок списка под lock(this) (все writers
-        /// состояния мяча тоже под этим монитором), отправка — вне перебора.
+        /// ФОРМАТ (подтверждён клиентом, см. документацию MapEventsAssembly):
+        ///   0|n|ssi|<mmo>|<eic>|<vru>|<speed>|<companyWithSpeed>
+        ///   0|n|sss|<companyID>|<speed>
+        ///   0|n|ssc|<companyID>|<newScore>|<portalID>
+        /// Второй токен — «n» (MapEvents), третий — сама команда. Раньше шали
+        /// "<uid>|ssi|..." — клиент разбирал uid как owner-frame, а "ssi" как
+        /// КОМАНДУ (не существующую) и молча игнорировал пакет: табло не
+        /// обновлялось. Префикс "0|n|" обязателен.
+        /// ВАЖНО (копия словаря): Users — общий Dictionary&lt;uint,User&gt;, его
+        /// меняют потоки сети (AddUser/Remove). Enumerating по живому словарю
+        /// бросает InvalidOperationException и обрывает рассылку посреди цикла —
+        /// часть игроков (или все) не получают ssi/ssc, табло молчит. Снимок —
+        /// под lock(this), отправка вне перебора.
         /// </summary>
         private void SendEvent(string packet)
         {
-            List<KeyValuePair<uint, User>> snapshot;
+            List<User> snapshot;
             lock (this)
-                snapshot = Users.ToList();
-            foreach (var pair in snapshot)
+                snapshot = Users.Values.ToList();
+            foreach (var u in snapshot)
             {
-                try { pair.Value.Send(pair.Key + "|" + packet); } catch { }
+                try { u.Send("0|n|" + packet); } catch { }
             }
         }
 
         private void SendEventTo(User u, string packet)
         {
-            try { u.Send(u.UserId + "|" + packet); } catch { }
+            try { u.Send("0|n|" + packet); } catch { }
         }
 
         /// <summary>Рассылка готового пакета (с префиксом) всем игрокам карты.</summary>
