@@ -18,7 +18,23 @@ namespace Do.Assembly
         public uint KamikazeLvl;
         public int Hp, Shield, Experience, Damage;
         public int X, Y;
+        // Базовая скорость пета = скорость корабля владельца + 20%.
+        // Обновляется в RecalcSpeed() при Activate и при каждом смене карты —
+        // раньше скорость ставилась только при создании пета/активации и после
+        // перехода на другую карту оставалась старой (или равной скорости
+        // корабля без бонуса).
         public uint Speed;
+        /// <summary>Пересчёт скорости пета: на 20% больше текущей скорости корабля.</summary>
+        public void RecalcSpeed()
+        {
+            try
+            {
+                var owner = Program.Users[UserId];
+                if (owner != null)
+                    Speed = (uint)(owner.Ship.speed * 1.2);
+            }
+            catch { }
+        }
         public DateTime KamiCld = new DateTime(2017, 3, 1, 7, 0, 0);
         public uint UserId { get; set; }
         public Pet(uint userId, int random)
@@ -30,7 +46,8 @@ namespace Do.Assembly
                 //    PetId = userId + 10000;
                 X = Program.Users[userId].Ship.x;
                 Y = Program.Users[userId].Ship.y;
-                Speed = Program.Users[userId].Ship.speed;
+                // Скорость пета всегда на 20% выше скорости корабля владельца.
+                Speed = (uint)(Program.Users[userId].Ship.speed * 1.2);
                 KamikazeLvl = 3;
                 Hp = 10000;
                 Shield = 10000;
@@ -67,7 +84,7 @@ namespace Do.Assembly
                 // что реально активен (по умолчанию — пассивный 101).
                 SendGearSync();
 
-                Speed = owner.Ship.speed;
+                RecalcSpeed(); // скорость пета = скорость корабля + 20%
                 X = owner.Ship.GetPosX();
                 Y = owner.Ship.GetPosY();
 
@@ -111,13 +128,20 @@ namespace Do.Assembly
 
         /// <summary>
         /// Восстановление пета на новой карте после перехода (портал/прыжок).
-        /// ВАЖНО: состояние окна пета хранится на клиенте и НЕ сбрасывается при
-        /// смене карты. Если сервер при входе на карту начнёт слать "0|PET|D"
-        /// (для выключенного пета) или "G|A/G|SEL" (для включённого), клиент
-        /// проигрывает звук остановки/запуска пета просто от входа на карту.
-        /// Поэтому здесь вообще ничего не отправляется, когда пет выключен, а
-        /// при включённом пете пересылаются только визуальные пакеты самого
-        /// дрона (PET|L / f|C), без оконных пакетов.
+        /// ВАЖНО: при смене карты Flash-клиент пересоздаёт игровое состояние, и
+        /// окно пета открывается в дефолтном ("выключенном") виде, даже если пет
+        /// активен и летает за игроком. Поэтому здесь:
+        ///  - обновляется скорость пета (скорость корабля +20% могла измениться
+        ///    вместе с экипировкой/навыками на новой карте);
+        ///  - шлётся "0|PET|I|1|1|1" — включает модуль дрона в UI без звука;
+        ///  - шлётся "0|PET|S|..." — состояние окна (прочность/щиты/опыт) и
+        ///    подсветка "включено";
+        ///  - пересылаются механизмы (G|A/G|D/G|SEL) — восстанавливается ровно
+        ///    тот механизм, что был выбран до перехода (SelectedGear);
+        ///  - пересылаются только визуальные пакеты самого дрона (PET|L), без
+        ///    звуковых оконных событий вроде PET|D / PET|Z.
+        /// Когда пет выключен — не отправляется ничего, чтобы вход на карту не
+        /// проигрывал "звук остановки".
         /// </summary>
         public void RestoreAfterMapChange()
         {
@@ -126,10 +150,24 @@ namespace Do.Assembly
                 if (!PetActive) return;
                 var owner = Program.Users[UserId];
                 if (owner == null) return;
+                RecalcSpeed(); // скорость актуальна для текущего корабля
                 X = owner.Ship.GetPosX();
                 Y = owner.Ship.GetPosY();
-                // Механизм уже выбран в клиентском окне и не сбрасывается при
-                // переходе — повторная синхронизация не нужна.
+                // При переходе на другую карту старый цикл Movement остаётся
+                // крутиться в фоне: он видит, что владельца нет в Users старой
+                // карты, и вызывает DeActivate() — пет "выключается" серверно,
+                // хотя визуально летает за игроком. Останавливаем старые циклы
+                // флагом (пет при этом остаётся PetActive=true), затем ниже
+                // запускаем новые циклы уже для новой карты.
+                PetActive = false;
+                PetActive = true;
+                // Инициализация модуля дрона в новом клиенте (без звука).
+                owner.Send("0|PET|I|1|1|1");
+                // Состояние окна пета: включён, прочность/щиты/опыт.
+                var exp = owner.Ship.exp / 900;
+                owner.Send("0|PET|S|1|15|" + exp + "|" + (exp + 10000) + "|999|999|999|999|1|15|1|[PET 15] " + owner.Ship.Name);
+                // Механизмы: подсвечиваем тот, что был выбран до перехода.
+                SendGearSync();
                 for (var index = 0; index < Program.Maps[owner.MapId].Users.Count; index++)
                 {
                     Program.Maps[owner.MapId].Users.ElementAt(index).Value.Send("0|PET|L|1|" + (owner.UserId + 1000) + "|15|[PET 15] " + owner.Ship.Name + " |" + owner.Ship.factionId + "|1|1|" + owner.Ship.tagName + "|0|" + X + "|" + Y + "|1|1|");
@@ -468,20 +506,14 @@ namespace Do.Assembly
         {
             try
             {
-                while (true)
+                // При переходе на другую карту старый цикл не должен вызывать
+                // DeActivate(): пет остаётся активным, а на новой карте цикл
+                // перезапускается из RestoreAfterMapChange. Проверяем только
+                // что пользователь ещё на сервере (не дисконектнулся).
+                while (PetActive && !Kami && Program.Users.ContainsKey(UserId))
                 {
-                    if (PetActive && !Kami)
-                    {
-                        Move();
-                        if (!Program.Maps[Program.Users[UserId].MapId].Users.ContainsKey(UserId))
-                        {
-                            DeActivate();
-                            return;
-                        }
-                        await Task.Delay(365);
-                        continue;
-                    }
-                    break;
+                    Move();
+                    await Task.Delay(365);
                 }
             }
             catch (Exception e)
