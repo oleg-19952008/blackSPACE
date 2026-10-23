@@ -53,16 +53,18 @@ namespace Do.serverGame
         private const int FieldWidth = 41600, FieldHeight = 25600;
 
         // Ворота трёх компаний: company 1=MMO, 2=EIC, 3=VRU.
-        // Реальные порталы события — по серединам сторон поля (как в оригинальном
-        // DarkOrbit Spaceball): MMO — низ, EIC — право, VRU — лево. Раньше стояли
-        // «угловые» точки (41300|22000 / 300|22000), из-за чего мяч летел в угол,
-        // а не в ворота. portalID в ssc — индекс ворот (0..2), соответствуют ключу.
+        // Координаты сняты с реальных порталов события на карте 4-4 (клиент
+        // показывает их игроку — туда и должен катиться мяч):
+        //   VRU — верх (28006|24074), MMO — лево (6035|12998), EIC — низ (28029|3034).
+        // Ранее стояли произвольные точки («угловые», потом середины сторон
+        // поля) — мяч катился мимо видимых клиентом ворот, игрок видел «в бок».
+        // portalID в ssc — индекс ворот (0..2), соответствуют ключу.
         private static readonly Dictionary<int, int[]> SpaceballGoals =
             new Dictionary<int, int[]>
             {
-                { 1, new[] { FieldCenterX, FieldHeight - 300 } },  // MMO  (низ поля)
-                { 2, new[] { FieldWidth - 300, FieldCenterY } },   // EIC  (правая сторона)
-                { 3, new[] { 300, FieldCenterY } },                // VRU  (левая сторона)
+                { 1, new[] { 6035, 12998 } },    // MMO  (левые ворота)
+                { 2, new[] { 28029, 3034 } },    // EIC  (нижние ворота)
+                { 3, new[] { 28006, 24074 } },   // VRU  (верхние ворота)
             };
 
         // Стабильный порядок ворот для portalID в ssc (индекс 0..2 по ключу).
@@ -190,12 +192,15 @@ namespace Do.serverGame
         /// направление через (int)-деление — при dy = 0 мяч «летел просто в бок»
         /// вдоль стороны поля мимо створа. Здесь расписание остаётся дробным,
         /// а округляем мы только саму скорость-вектор целиком.
+        /// Дистанция до створа > GoalRadius — иначе AimAtGoal из HitSpaceball
+        /// вызывается рекурсивно (ApplyBallVelocity -> AimAtGoal -> AimAtGoal),
+        /// когда игрок стоит вплотную к своим воротам (мяч уже в створе).
         /// </summary>
         private void AimAtGoal(int[] goal)
         {
             double dx = goal[0] - (double)BallX, dy = goal[1] - (double)BallY;
             double len = Math.Sqrt(dx * dx + dy * dy);
-            if (len < 1) { _ballVX = 0; _ballVY = 0; return; }
+            if (len < GoalRadius) { _ballVX = 0; _ballVY = 0; return; }
             _ballVX = (int)Math.Round(dx / len * _ballSpeed);
             _ballVY = (int)Math.Round(dy / len * _ballSpeed);
         }
@@ -334,6 +339,10 @@ namespace Do.serverGame
         /// игрока сквозь мяч не приводит к воротам ударившей корпорации (мяч
         /// ушёл «в бок»), вектор доворачивается на ворота — гарантированный
         /// полёт в створ, а не вдоль стороны поля.
+        /// СТАРТ С ЦЕНТРА: если мяч стоит ровно в центре поля (только что
+        /// после гола/возврата), линия «игрок -> мяч» даёт произвольный угол и
+        /// мяч улетал «просто в бок». В этом случае вектор сразу наводится на
+        /// ворота ударившей корпорации.
         /// </summary>
         public void HitSpaceball(int attackerCompany, double damage, int fromX, int fromY)
         {
@@ -344,9 +353,11 @@ namespace Do.serverGame
                 _ballHitter = attackerCompany;
                 _ballDamage += Math.Max(1, damage);
                 _lastHitMs = Environment.TickCount;
-                ApplyBallVelocity();
 
-                if (_ballSpeed > 0)
+                bool atCenter = BallX == FieldCenterX && BallY == FieldCenterY;
+                ApplyBallVelocity();   // при stand-in-center сам наводит вектор на ворота
+
+                if (_ballSpeed > 0 && !atCenter)
                 {
                     // Вектор удара: продолжение линии «игрок -> мяч».
                     double dx = BallX - (double)fromX, dy = BallY - (double)fromY;
@@ -355,14 +366,12 @@ namespace Do.serverGame
                     {
                         _ballVX = (int)Math.Round(dx / len * _ballSpeed);
                         _ballVY = (int)Math.Round(dy / len * _ballSpeed);
-                        // Проверка: приведёт ли этот удар к воротам? Считаем
-                        // расстояние от точки мяча до ближайшего створа вдоль
-                        // прямой полёта; если мимо — целимся прямо на ворота.
+                        // Проверка: приведёт ли этот удар к воротам? Если прямая
+                        // уходит «в сторону» — целимся прямо на ворота.
                         int[] goal;
                         if (SpaceballGoals.TryGetValue(attackerCompany, out goal))
                         {
                             double gx = goal[0] - (double)BallX, gy = goal[1] - (double)BallY;
-                            // Косинус угла между вектором удара и направлением на ворота.
                             double glen = Math.Sqrt(gx * gx + gy * gy);
                             double cos = glen < 1 ? 1 : (dx * gx + dy * gy) / (len * glen);
                             if (cos < 0.85) AimAtGoal(goal); // удар «в сторону» — наводим на створ
