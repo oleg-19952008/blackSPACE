@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
@@ -262,7 +263,10 @@ namespace Do.Assembly
                         break;
                     case 102:
                         GuardMode = true;
-                        AttackLoop();
+                        // Цикл атаки уже запущен в Activate()/RestoreAfterMapChange()
+                        // и сам проверяет GuardMode на каждой итерации. Второй
+                        // AttackLoop() отсюда порождает параллельные циклы — при
+                        // повторном включении защиты пет начинал спамить выстрелами.
                         break;
                 }
             }
@@ -390,7 +394,19 @@ namespace Do.Assembly
             try
             {
                 var owner = Program.Users[UserId];
-                if (!owner.Ship.isAttacking)
+                // Раньше здесь проверялся только флаг Ship.isAttacking. Этот флаг
+                // сервер выставляет в обработчике пакета "G" (отдаление цели на
+                // 1000+ px), а при обычном удержании ЛКМ по NPC клиент шлёт лишь
+                // "a|<цель>" + "1|x|y|...", и isAttacking для NPC мог оставаться
+                // false — пет никогда не стрелял по мобам. Теперь цель берётся из
+                // selectedUserId (его клиент шлёт пакетом SEL, см. лог:
+                // "LOG.INPUT:SEL|36"), а факт атаки определяется так же, как у
+                // корабля владельца: isAttacking ИЛИ выбранная цель с активным
+                // режимом защиты (в guard-режиме пет должен атаковать всё, что
+                // атакует игрок).
+                var attacking = owner.Ship.isAttacking ||
+                                (GuardMode && owner.Ship.selectedUserId != 0);
+                if (!attacking)
                 {
                     return;
                 }
@@ -421,7 +437,9 @@ namespace Do.Assembly
                 }
                 var userId = targetId;
                 var enemy = Program.Users[userId];
-                var power = Convert.ToInt32(Program.Users[UserId].Ship.damage * (Program.Users[UserId].LaserId == 5 ? 2 : 1));
+                // Урон пета по игроку = 10% урона корабля владельца.
+                var power = Convert.ToInt32(owner.Ship.damage * (owner.LaserId == 5 ? 2 : 1) * 0.1);
+                if (power < 1) power = 1;
                 var realDamage = power;
                 power = power + new Random().Next(-10, 10);
                 var packet = "0|a|" + PetId + "|" + userId + "|" + (Program.Users[UserId].LaserId - 1) + "|1|1";
@@ -555,7 +573,9 @@ namespace Do.Assembly
                 _petLaserCooldown.Add(targetId);
                 Task.Delay(1500).ContinueWith(_ => _petLaserCooldown.Remove(targetId));
 
-                var power = Damage + Program.Random.Next(-10, 10);
+                // Урон пета = 10% урона корабля владельца (по требованию).
+                var power = Convert.ToInt32(owner.Ship.damage * 0.1) + Program.Random.Next(-10, 10);
+                if (power < 1) power = 1;
                 var realDamage = power;
                 var absorb = 0;
 
