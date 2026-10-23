@@ -36,7 +36,7 @@ partial class User
                     if (!Ship.isAttacking || !CheckLaser() || LaserCooldownList.Contains(selected) || LaserCooldownList.Count > 2)
                         return;
                     var sbMap = Program.Maps[MapId];
-                    double sbDist = Distance.Get(sbMap.BallX, Ship.x, sbMap.BallY, Ship.y);
+                    int sbDist = Distance.Get(sbMap.BallX, Ship.x, sbMap.BallY, Ship.y);
                     if (sbDist > 840)
                     {
                         if (!Ship.AvisedO) { Ship.AvisedO = true; Send("0|O"); }

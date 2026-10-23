@@ -138,6 +138,10 @@ namespace Do.serverGame
         {
             try
             {
+                // Spaceball: снимаем игрока с видимости мяча (id 900 остаётся в
+                // Users на других картах — удаление флага важно для корректного
+                // f|R| при следующем входе).
+                if (_id == SpaceballFieldMap) UpdateBallVisibility(userId, false);
                 Users.Remove(userId);
                 Parallel.ForEach(Users, pair => pair.Value.Send("f|R|" + userId));
             }

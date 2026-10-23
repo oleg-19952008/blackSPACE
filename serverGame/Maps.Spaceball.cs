@@ -55,6 +55,8 @@ namespace Do.serverGame
         private int _ballHitter = 0;               // корпорация, последним ударившая мяч
         private double _ballDamage = 0;            // накопленный урон текущего полёта -> скорость
         private int _ballAngle = 730;              // визуальный угол движения (для moveShip)
+        // Игроки, которым виден мяч (аналог PlayersInRange у NPC).
+        public readonly HashSet<uint> BallViewers = new HashSet<uint>();
         // Счёт: всегда ровно 3 компании (1=MMO, 2=EIC, 3=VRU).
         public readonly Dictionary<int, int> SpaceballScore = new Dictionary<int, int> { { 1, 0 }, { 2, 0 }, { 3, 0 } };
 
@@ -67,13 +69,39 @@ namespace Do.serverGame
             _spaceballThread.Start();
         }
 
+        /// <summary>
+        /// Динамическая видимость мяча (как у NPC): при входе игрока на карту
+        /// отправляем спавн, если он в радиусе видимости, и снимаем видимость
+        /// при выходе. Вызывается из UpdateAlienVisibility / RemoveUser.
+        /// </summary>
+        public void UpdateBallVisibility(uint userId, bool show)
+        {
+            if (_id != SpaceballFieldMap) return;
+            lock (this)
+            {
+                if (show)
+                {
+                    if (BallViewers.Contains(userId)) return;
+                    BallViewers.Add(userId);
+                    if (!Users.ContainsKey(userId)) return;
+                    Users[userId].Send("f|C|" + SpaceballBallId + "|" + SpaceballPatternId + "|1||Spaceball|" + BallX + "|" + BallY + "|" +
+                                       SpaceballCompanyId + "|0|0|7||0|0");
+                    Users[userId].Send("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
+                }
+                else
+                {
+                    if (!BallViewers.Remove(userId)) return;
+                    if (Users.ContainsKey(userId)) Users[userId].Send("f|R|" + SpaceballBallId);
+                }
+            }
+        }
+
         private void SpaceballLoop()
         {
             try
             {
                 while (_spaceballRunning)
                 {
-                    string move = null;
                     lock (this)
                     {
                         if (_ballSpeed > 0)
@@ -82,9 +110,13 @@ namespace Do.serverGame
                             CheckGoal();
                         }
                         if (_ballSpeed > 0)
-                            move = "0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle;
+                        {
+                            // Шлём движение только тем, кому мяч виден.
+                            foreach (var uid in BallViewers.ToList())
+                                if (Users.ContainsKey(uid))
+                                    try { Users[uid].Send("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle); } catch { }
+                        }
                     }
-                    if (move != null) Broadcast(move);
                     Thread.Sleep(MovementTickMs);
                 }
             }
@@ -167,14 +199,7 @@ namespace Do.serverGame
                 u.Send("ssc|" + goal.Key + "|" + SpaceballScore[goal.Key] + "|" + idx);
                 idx++;
             }
-            lock (this)
-            {
-                // 4) Мяч: корабль с паттерном 442 (spaceball="true"), компания 4 —
-                //    нейтральная, своей корпорации у мяча нет.
-                u.Send("f|C|" + SpaceballBallId + "|" + SpaceballPatternId + "|1||Spaceball|" + BallX + "|" + BallY + "|" +
-                       SpaceballCompanyId + "|0|0|7||0|0");
-                u.Send("0|1|" + SpaceballBallId + "|" + BallX + "|" + BallY + "|" + _ballAngle);
-            }
+            // Спавн/видимость мяча обрабатывает UpdateBallVisibility (по радиусу).
             StartSpaceball();
         }
 

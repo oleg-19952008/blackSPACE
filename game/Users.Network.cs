@@ -409,7 +409,25 @@ partial class User
                         else if (packetHeader.StartsWith("a"))
                         {
 
-                            if (Ship.selectedUserId != 0)
+                            // Spaceball: прямое нажатие ЛКМ по мячу — включаем атаку,
+                            // дальнейшую обработку ведёт Alienattack (ветка Spaceball).
+                            if (Ship.selectedUserId == Do.serverGame.Map.SpaceballBallId && MapId == Do.serverGame.Map.SpaceballFieldMap)
+                            {
+                                if (Ship.damage == 0)
+                                {
+                                    Send("0|A|STD|You don't have any lasers equipped.");
+                                }
+                                else if (!CheckLaser())
+                                {
+                                    Send("0|A|STD|Aborting attack. Not enough laser ammo for an attack.");
+                                }
+                                else
+                                {
+                                    Ship.isAttacking = true;
+                                    AttackId = Ship.selectedUserId;
+                                }
+                            }
+                            else if (Ship.selectedUserId != 0)
                             {
                                 if (Ship.damage == 0)
                                 {

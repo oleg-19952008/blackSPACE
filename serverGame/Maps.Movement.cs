@@ -44,6 +44,12 @@ namespace Do.serverGame
 
                 UpdateAlienVisibility(userId, nX, nY);
                 UpdatePlayersVisibility(userId, nX, nY, movementPacket);
+                // Spaceball: мяч виден/скрыт по мере приближения-удаления игрока.
+                if (_id == SpaceballFieldMap)
+                {
+                    int ballDist = Distance.Get(BallX, nX, BallY, nY);
+                    UpdateBallVisibility(userId, ballDist < ViewRange);
+                }
 
                 // Пересчёт позиции после интерполяции для зон безопасности/радиации
                 nX = Users[userId].Ship.GetPosX();
