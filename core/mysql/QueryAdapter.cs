@@ -78,10 +78,10 @@ namespace MySQLManager.Database.Session_Details
                     hasRows = reader.HasRows;
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return hasRows;
         }
 
@@ -103,10 +103,10 @@ namespace MySQLManager.Database.Session_Details
                     int.TryParse(obj2.ToString(), out result);
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return result;
         }
 
@@ -132,10 +132,10 @@ namespace MySQLManager.Database.Session_Details
                     row = dataSet.Tables[0].Rows[0];
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return row;
         }
 
@@ -157,10 +157,10 @@ namespace MySQLManager.Database.Session_Details
                     str = obj2.ToString();
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return str;
         }
 
@@ -181,10 +181,10 @@ namespace MySQLManager.Database.Session_Details
                     adapter.Fill(dataTable);
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return dataTable;
         }
 
@@ -203,10 +203,10 @@ namespace MySQLManager.Database.Session_Details
                 this.command.ExecuteScalar();
                 lastInsertedId = this.command.LastInsertedId;
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
 
             return lastInsertedId;
         }
@@ -241,9 +241,9 @@ namespace MySQLManager.Database.Session_Details
                 {
                     return (long)command.ExecuteScalar();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    Out.WriteLine("Error [MySQL] " + this.command.CommandText);
+                    LogQueryError(ex);
                     return 0;
                 }
             }
@@ -275,7 +275,7 @@ namespace MySQLManager.Database.Session_Details
             }
             catch (Exception e)
             {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
+                LogQueryError(e);
                 // Было: голый throw без try/catch у вызывающего кода — любая ошибка
                 // SQL (например, UPDATE количества ракет в UpdateRocket()) молча
                 // разрывала цепочку обработки пакета: update не выполнялся, а
@@ -313,6 +313,58 @@ namespace MySQLManager.Database.Session_Details
                 // Откат мог уже быть выполнен ранее (double-rollback) — логируем и
                 // продолжаем пробрасывать исходную ошибку.
                 Out.WriteLine("MySQL rollback failed: " + rollbackError.Message);
+            }
+        }
+
+        /// <summary>
+        /// Подробно логирует ошибку выполнения SQL-команды: тип и сообщение исключения,
+        /// текст запроса, значения параметров (и внутренние ошибки, например у MySqlException).
+        /// </summary>
+        /// <param name="ex">Перехваченное исключение.</param>
+        private void LogQueryError(Exception ex)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append("Error [MySQL] ").Append(ex.GetType().Name).Append(": ").Append(ex.Message);
+                sb.AppendLine();
+                sb.Append("  Query: ").Append(this.command != null ? this.command.CommandText : "<null>");
+                if (this.command != null && this.command.Parameters != null && this.command.Parameters.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.Append("  Parameters:");
+                    foreach (IDataParameter p in this.command.Parameters)
+                    {
+                        sb.Append(" ").Append(p.ParameterName).Append("=").Append(
+                            p.Value == null ? "NULL" : Convert.ToString(p.Value, System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                }
+                // Для MySqlException дополнительно печатаем код ошибки MySQL (Number) —
+                // например 1146 = "Table doesn't exist", 1054 = "Unknown column".
+                var myEx = ex as MySqlException;
+                if (myEx != null)
+                {
+                    sb.AppendLine();
+                    sb.Append("  MySqlErrorCode: ").Append(myEx.Number);
+                }
+                // Выводим всю цепочку InnerException — без неё видно только симптом, а не причину.
+                var inner = ex.InnerException;
+                int depth = 1;
+                while (inner != null)
+                {
+                    sb.AppendLine();
+                    sb.Append("  Inner[").Append(depth++).Append("] ").Append(inner.GetType().Name).Append(": ").Append(inner.Message);
+                    inner = inner.InnerException;
+                }
+                sb.AppendLine();
+                sb.Append("  StackTrace:").AppendLine().Append(ex.StackTrace);
+                Out.WriteLine(sb.ToString());
+            }
+            catch (Exception logError)
+            {
+                // Логирование не должно ронять сервер; на худой конец пишем минимальную строку.
+                Out.WriteLine("Error [MySQL] (failed to build detailed log: " + logError.Message + ") " +
+                              (this.command != null ? this.command.CommandText : "<null>"));
             }
         }
 

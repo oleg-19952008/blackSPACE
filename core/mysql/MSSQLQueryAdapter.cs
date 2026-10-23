@@ -3,6 +3,7 @@ using System.Data;
 using System.Data.SqlClient;
 using MySQLManager.Database;
 using MySQLManager.Session_Details.Interfaces;
+using Do;
 
 namespace Do.core.mysql
 {
@@ -76,10 +77,10 @@ namespace Do.core.mysql
                     hasRows = reader.HasRows;
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return hasRows;
         }
 
@@ -101,10 +102,10 @@ namespace Do.core.mysql
                     int.TryParse(obj2.ToString(), out result);
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return result;
         }
 
@@ -130,10 +131,10 @@ namespace Do.core.mysql
                     row = dataSet.Tables[0].Rows[0];
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return row;
         }
 
@@ -155,10 +156,10 @@ namespace Do.core.mysql
                     str = obj2.ToString();
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return str;
         }
 
@@ -179,10 +180,10 @@ namespace Do.core.mysql
                     adapter.Fill(dataTable);
                 }
             }
-            catch (Exception)
-            {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
-            }
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
             return dataTable;
         }
 
@@ -216,9 +217,9 @@ namespace Do.core.mysql
                 {
                     return (long)command.ExecuteScalar();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    Out.WriteLine("Error [MySQL] " + this.command.CommandText);
+                    LogQueryError(ex);
                     return 0;
                 }
             }
@@ -246,9 +247,58 @@ namespace Do.core.mysql
             {
                 this.command.ExecuteNonQuery();
             }
-            catch (Exception)
+            catch (Exception ex)
+                {
+                LogQueryError(ex);
+                }
+        }
+
+        /// <summary>
+        /// Подробно логирует ошибку выполнения SQL-команды: тип и сообщение исключения,
+        /// текст запроса, значения параметров и всю цепочку InnerException.
+        /// </summary>
+        /// <param name="ex">Перехваченное исключение.</param>
+        private void LogQueryError(Exception ex)
+        {
+            try
             {
-                Out.WriteLine("Error [MySQL] " + this.command.CommandText);
+                var sb = new System.Text.StringBuilder();
+                sb.Append("Error [MsSQL] ").Append(ex.GetType().Name).Append(": ").Append(ex.Message);
+                sb.AppendLine();
+                sb.Append("  Query: ").Append(this.command != null ? this.command.CommandText : "<null>");
+                if (this.command != null && this.command.Parameters != null && this.command.Parameters.Count > 0)
+                {
+                    sb.AppendLine();
+                    sb.Append("  Parameters:");
+                    foreach (IDataParameter p in this.command.Parameters)
+                    {
+                        sb.Append(" ").Append(p.ParameterName).Append("=").Append(
+                            p.Value == null ? "NULL" : Convert.ToString(p.Value, System.Globalization.CultureInfo.InvariantCulture));
+                    }
+                }
+                // Для SqlException печатаем код ошибки сервера (Number).
+                var sqlEx = ex as SqlException;
+                if (sqlEx != null)
+                {
+                    sb.AppendLine();
+                    sb.Append("  SqlServerErrorCode: ").Append(sqlEx.Number);
+                }
+                var inner = ex.InnerException;
+                int depth = 1;
+                while (inner != null)
+                {
+                    sb.AppendLine();
+                    sb.Append("  Inner[").Append(depth++).Append("] ").Append(inner.GetType().Name).Append(": ").Append(inner.Message);
+                    inner = inner.InnerException;
+                }
+                sb.AppendLine();
+                sb.Append("  StackTrace:").AppendLine().Append(ex.StackTrace);
+                Out.WriteLine(sb.ToString());
+            }
+            catch (Exception logError)
+            {
+                Out.WriteLine("Error [MsSQL] (failed to build detailed log: " + logError.Message + ") " +
+                              (this.command != null ? this.command.CommandText : "<null>"));
             }
         }
 
