@@ -389,11 +389,37 @@ namespace Do.Assembly
         {
             try
             {
-                if (!Program.Users[UserId].Ship.isAttacking || !Program.Users[UserId].Ship.InRange)
+                var owner = Program.Users[UserId];
+                if (!owner.Ship.isAttacking)
                 {
                     return;
                 }
-                var userId = Program.Users[UserId].Ship.selectedUserId;
+                var targetId = owner.Ship.selectedUserId;
+                if (targetId == 0 || !Program.Maps.ContainsKey(owner.MapId))
+                {
+                    return;
+                }
+
+                // Цель < 1000 — NPC: раньше Attack() искала цель только среди
+                // игроков (Program.Users[targetId]), из-за чего пет в режиме
+                // защиты вообще не атаковал мобов. Теперь, как и корабль
+                // владельца, пета атакует любого, кого выбрано: и игроков, и NPC.
+                if (targetId < 1000)
+                {
+                    PetAttackAlien(owner, targetId);
+                    return;
+                }
+
+                if (!Program.Users.ContainsKey(targetId) ||
+                    Program.Users[targetId].MapId != owner.MapId)
+                {
+                    return;
+                }
+                if (!owner.Ship.InRange)
+                {
+                    return;
+                }
+                var userId = targetId;
                 var enemy = Program.Users[userId];
                 var power = Convert.ToInt32(Program.Users[UserId].Ship.damage * (Program.Users[UserId].LaserId == 5 ? 2 : 1));
                 var realDamage = power;
@@ -497,6 +523,105 @@ namespace Do.Assembly
             catch (Exception e)
             {
                 // Out.WriteLine(e.StackTrace);
+            }
+        }
+
+        /// <summary>
+        /// Атака пета по NPC (мобу), которого атакует владелец в режиме защиты.
+        /// Пакеты и расчёт урона повторяют лазерную атаку игрока
+        /// (User.Alienattack): "0|a|<атакующий>|<цель>|<лазер>|1|1", урон — "0|Y|...",
+        /// "недостаточно далеко" — "0|O|". Отдельный cooldown-список, чтобы не
+        /// мешать циклу лазеров самого игрока.
+        /// </summary>
+        private readonly List<uint> _petLaserCooldown = new List<uint>();
+        private void PetAttackAlien(game.User owner, uint targetId)
+        {
+            try
+            {
+                var map = Program.Maps[owner.MapId];
+                if (!map.Aliens.ContainsKey(targetId)) return;
+                var alien = map.Aliens[targetId];
+                if (alien.Destroyed) return;
+
+                var distance = Distance.Get(alien.X, X, alien.Y, Y);
+                if (distance > 840)
+                {
+                    // Пет ещё не долетел до моба — ждём (клиенту ничего не шлём,
+                    // предупреждение "0|O|" относится к кораблю игрока).
+                    return;
+                }
+
+                if (_petLaserCooldown.Contains(targetId)) return;
+                _petLaserCooldown.Add(targetId);
+                Task.Delay(1500).ContinueWith(_ => _petLaserCooldown.Remove(targetId));
+
+                var power = Damage + Program.Random.Next(-10, 10);
+                var realDamage = power;
+                var absorb = 0;
+
+                if (alien.Shield > 0)
+                {
+                    if (alien.Shield > (uint)realDamage)
+                    {
+                        alien.Shield -= Convert.ToUInt32(realDamage);
+                        absorb = realDamage;
+                        realDamage = 0;
+                    }
+                    else
+                    {
+                        absorb = (int)alien.Shield;
+                        realDamage -= (int)alien.Shield;
+                        alien.Shield = 0;
+                    }
+                }
+                realDamage = Math.Abs(realDamage);
+                realDamage = realDamage - Convert.ToInt32(realDamage *
+                    (Program.Npcs[alien.TypeId].ShieldAbsorb / 100m));
+
+                var packet = "0|a|" + PetId + "|" + targetId + "|4|1|1";
+                var packet2 = "0|Y|" + PetId + "|" + targetId + "|L|" + alien.Hp + "|" + alien.Shield + "|" + power + "|100|1";
+                var packet3 = "0|M|" + PetId + "|" + targetId + "|L|" + alien.Hp + "|" + alien.Shield + "|" + power + "|100|1";
+
+                alien.ReceivedAttack(owner.UserId);
+
+                if (alien.Hp <= (uint)realDamage || alien.Hp > Program.Npcs[alien.TypeId].Hp)
+                {
+                    alien.Hp = 0;
+                    foreach (var pair in map.Users)
+                    {
+                        pair.Value.Send(packet);
+                        if (pair.Value.Ship.selectedUserId == targetId || pair.Value.UserId == owner.UserId)
+                            pair.Value.Send(packet2);
+                    }
+                    if (!alien.Destroyed)
+                    {
+                        alien.SelectedUserId = 0;
+                        alien.Destroyed = true;
+                        foreach (var user in alien.Move.PlayersInRange.Where(user => Program.Users.ContainsKey(user)))
+                        {
+                            Program.Users[user].Send("0|K|" + targetId);
+                        }
+                        // Опыт за килл начисляется владельцу пета (как при его собственной атаке).
+                        owner.UpdateUser(2, targetId);
+                        alien.Regenerate();
+                    }
+                }
+                else
+                {
+                    alien.Hp -= Convert.ToUInt32(realDamage);
+                    foreach (var pair in map.Users)
+                    {
+                        pair.Value.Send(packet);
+                        if (pair.Value.Ship.selectedUserId == targetId || pair.Value.UserId == owner.UserId)
+                        {
+                            pair.Value.Send(packet2);
+                            pair.Value.Send(packet3);
+                        }
+                    }
+                }
+            }
+            catch (Exception)
+            {
             }
         }
         #endregion

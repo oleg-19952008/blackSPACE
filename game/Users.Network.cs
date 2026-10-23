@@ -860,12 +860,47 @@ partial class User
                                     PlayersInRange = new List<uint>();
                                     PlayersInRange.Add(UserId);
 
+                                    // Позиция после прыжка: центр новой карты. Иначе
+                                    // серверные координаты оставались от старой карты,
+                                    // клиент после перезагрузки рисовал корабль в центре,
+                                    // и проверка дистанции до портала ("слишком далеко")
+                                    // использовала именно старые координаты.
+                                    // Координаты центра стандартной границы мира (20800x12800).
+                                    var newX = 10400;
+                                    var newY = 6400;
+
                                     if (Program.Maps.ContainsKey((ushort)oldMapId))
                                         Program.Maps[(ushort)oldMapId].RemoveUser(UserId);
 
                                     // Меняем карту и добавляем юзера на новую.
                                     MapId = (ushort)map_id;
+                                    Ship.x = newX;
+                                    Ship.y = newY;
+                                    Ship.destinationx = newX;
+                                    Ship.destinationy = newY;
+                                    Ship.teleporting = 0;
+                                    Ship.teleporting2 = 0;
+                                    Ship.logout3 = 0;
+                                    Ship.buclemover = false;
+                                    Ship.teleported = false;
+                                    Ship.teleport1 = false;
+
+                                    // Команда клиенту перезагрузить игровую карту
+                                    // (тот же механизм, что у порталов: "0|U|<mapId>|<id>",
+                                    // где id=0 означает админский переход). Без этого
+                                    // пакета клиент менял только миникарту-картинку, но
+                                    // продолжал слать координаты в границах старой карты:
+                                    // движение было, а по миникарте корабль "стоял",
+                                    // телепорт считался недоступным.
+                                    Send("0|U|" + map_id + "|0");
+
                                     Program.Maps[(ushort)map_id].AddUser(UserId);
+
+                                    // Перезапуск цикла движения уже на новой карте:
+                                    // старый цикл завершился при RemoveUser со старой
+                                    // карты (Users.ContainsKey == false), без этого
+                                    // сервер переставал интерполировать позицию.
+                                    Program.Maps[(ushort)map_id].Move(UserId);
 
                                     Send("0|A|STD|Прыгнул на карту " + map_id);
                                     Out.WriteLine("[Admin] User " + UserId + " (" + Ship.Name +
