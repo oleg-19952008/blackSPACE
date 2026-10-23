@@ -26,6 +26,9 @@ namespace Do.serverGame
             map.Users[user].sendStations();
             map.Users[user].Ship.lunchrsb = false;
             map.SendPortals(user);
+            // Spaceball: на карте 4-4 (id 16) показываем входящему игроку мяч,
+            // ворота и счёт; заодно гарантируем, что цикл мяча запущен.
+            if (_id == SpaceballFieldMap) map.SendSpaceballTo(user);
 
             if (map.Users[user].Ship.teleported)
             {
@@ -70,6 +73,9 @@ namespace Do.serverGame
             SendPortals(userId);
             SendMines(userId);
             SendCargos(userId);
+            // Spaceball: на карте 4-4 (id 16) показываем входящему игроку мяч,
+            // ворота и текущий счёт; заодно гарантируем запуск цикла мяча.
+            if (_id == SpaceballFieldMap) SendSpaceballTo(userId);
             // Синхронизация состояния пета после смены карты. Раньше здесь при
             // каждом входе на карту отправлялся "0|PET|D" (для выключенного пета)
             // и оконные пакеты G|A/G|SEL (для включённого) — клиент из-за этого

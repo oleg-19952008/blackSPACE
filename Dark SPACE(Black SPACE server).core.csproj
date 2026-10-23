@@ -117,6 +117,7 @@
     <Compile Include="serverGame\Maps.Movement.cs" />
     <Compile Include="serverGame\Maps.Objects.cs" />
     <Compile Include="serverGame\Maps.Portals.cs" />
+    <Compile Include="serverGame\Maps.Spaceball.cs" />
     <Compile Include="serverGame\Maps.Users.cs" />
   </ItemGroup>
   <ItemGroup>
