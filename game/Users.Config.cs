@@ -420,6 +420,49 @@ partial class User
         private volatile bool _destroyed = false;
         private int _disconnectStarted = 0;
         private CancellationTokenSource _pingCts;
+        // СОХРАНЕНИЕ ПОСЛЕДНЕЙ ПОЗИЦИИ (карта + координаты) во время игры.
+        // Вызывается из фонового цикла UpdateShip_ (каждые 5 секунд). Без этого
+        // mapId/x/y в БД обновлялись только по явным путям дисконнекта
+        // (discconectUser(1)/(-1)), которые при обычном выходе клиента из игры
+        // часто не срабатывали (сокет висел до пинг-таймаута, либо сервер падал) —
+        // в итоге игрока при следующем входе выбрасывало на старую карту.
+        private ushort _lastSavedMapId = ushort.MaxValue;
+        private int _lastSavedX = int.MinValue;
+        private int _lastSavedY = int.MinValue;
+
+        public void SavePositionToDatabase()
+        {
+            try
+            {
+                ushort currentMap = MapId;
+                int x = Ship.x, y = Ship.y;
+
+                // Валидация: не пишем в БД мусор (несуществующая карта или нулевые
+                // координаты до инициализации корабля) — иначе при следующем входе
+                // игрока выбрасывало бы на битую позицию.
+                if (!Program.Maps.ContainsKey(currentMap)) return;
+                if (x <= 0 && y <= 0) return;
+
+                // Пишем в БД только при реальном изменении позиции — иначе каждые
+                // 5 секунд шли бы бесполезные UPDATE.
+                if (currentMap == _lastSavedMapId && x == _lastSavedX && y == _lastSavedY) return;
+
+                using (var dbClient = Program.Manager.getQueryreactor())
+                {
+                    dbClient.query("UPDATE server_1_players SET mapId = '" + currentMap + "', x = '" + x + "', y = '" + y + "' WHERE playerID = '" + UserId + "'");
+                }
+
+                _lastSavedMapId = currentMap;
+                _lastSavedX = x;
+                _lastSavedY = y;
+            }
+            catch (Exception e)
+            {
+                Out.WriteLine("SavePositionToDatabase failed for user " + UserId + ": " + e.Message,
+                              "User.DbSync", ConsoleColor.DarkYellow);
+            }
+        }
+
         public int[] GetXY()
         {
             // СОХРАНЕНИЕ ПОСЛЕДНЕЙ ПОЗИЦИИ: раньше здесь координаты и карта
