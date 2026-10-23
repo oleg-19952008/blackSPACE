@@ -19,8 +19,9 @@ namespace Do.serverGame
     ///    владельцу пробитых ворот). Вектор пересчитывается на каждый удар, поэтому
     ///    мяч летит именно в ворота, а не улетает в угол карты.
     ///  - Баланс урона: 3000 — малый, 75000 — мощный. Мяч трогается при накопленном
-    ///    уроне ~12000 (BallMoveThreshold) с медленной скоростью (~1200 px/s);
-    ///    при 30000 — быстрее (~3000 px/s); при 75000+ — максимум (~7500 px/s).
+    ///    уроне ~12000 (BallMoveThreshold) со скорости корабля (~450 px/s);
+    ///    при 75000+ — максимум (~600 px/s), сопоставимо с быстро летящим
+    ///    кораблём (игроки летают 500-600) — мяч можно догнать.
     ///    Если по мячу долго не бьют, урон «остывает» и мяч останавливается.
     ///  - Гол: ssc|company|newScore|portalID рассылаться должен ТАКЖЕ как "0|ssc|..."
     ///    (см. SendEvent — клиент парсит события только с префиксом owner-фрейма).
@@ -41,22 +42,27 @@ namespace Do.serverGame
 
         // Баланс: 3000 — малый урон, 75000 — мощный.
         private const double BallMoveThreshold = 12000;     // урон, при котором мяч трогается
-        private const int BallMinSpeed = 400;               // скорость на пороге (~12k): медленный полёт
-        private const int BallMaxSpeed = 1500;              // потолок скорости (на ~75k+): очень быстрый
+        private const int BallMinSpeed = 450;               // скорость на пороге (~12k): как корабль
+        private const int BallMaxSpeed = 600;               // потолок (на ~75k+): не быстрее 600 —
+                                                            // игрок на 500-600 может догнать мяч
         private const double BallDamageDecayPerSec = 2500;  // остывание урона при простое
         private const int GoalRadius = 1200;                // радиус створа ворот
 
         // Центр поля; границы карты 16 — 41600 x 25600.
         private const int FieldCenterX = 20800, FieldCenterY = 12800;
+        private const int FieldWidth = 41600, FieldHeight = 25600;
 
         // Ворота трёх компаний: company 1=MMO, 2=EIC, 3=VRU.
-        // portalID в ssc — индекс ворот (0..2), соответствуют ключу словаря.
+        // Реальные порталы события — по серединам сторон поля (как в оригинальном
+        // DarkOrbit Spaceball): MMO — низ, EIC — право, VRU — лево. Раньше стояли
+        // «угловые» точки (41300|22000 / 300|22000), из-за чего мяч летел в угол,
+        // а не в ворота. portalID в ssc — индекс ворот (0..2), соответствуют ключу.
         private static readonly Dictionary<int, int[]> SpaceballGoals =
             new Dictionary<int, int[]>
             {
-                { 1, new[] { 20800, 300 } },     // MMO  (низ поля)
-                { 2, new[] { 41300, 22000 } },   // EIC  (правый верх)
-                { 3, new[] { 300, 22000 } },     // VRU  (левый верх)
+                { 1, new[] { FieldCenterX, FieldHeight - 300 } },  // MMO  (низ поля)
+                { 2, new[] { FieldWidth - 300, FieldCenterY } },   // EIC  (правая сторона)
+                { 3, new[] { 300, FieldCenterY } },                // VRU  (левая сторона)
             };
 
         private Thread _spaceballThread;
@@ -243,6 +249,10 @@ namespace Do.serverGame
                 // ssc|company|newScore|portalID — обновляет табло клиента
                 // (GuiManager.updateScoreboard) + анимацию портала.
                 SendEvent("ssc|" + scorer + "|" + SpaceballScore[scorer] + "|" + idx);
+                // Обновление самого табло счёта: клиент рисует цифры из
+                // INIT_SCOREBOARD (ssi), а SET_SCORE (ssc) лишь анимирует портал.
+                // Без повторного ssi счёт на табло после гола оставался нулевым.
+                SendEvent("ssi|" + SpaceballScore[1] + "|" + SpaceballScore[2] + "|" + SpaceballScore[3] + "|0|0");
                 Broadcast("0|A|STD|GOAL! Company " + scorer + " scores (" + SpaceballScore[scorer] + ").");
                 break;
             }
